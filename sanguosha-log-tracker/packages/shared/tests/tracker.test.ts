@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { oneVOneDeckProfile } from "../src/cards"
-import { applyEvent, createInitialTrackerState, undoLastEvent } from "../src/tracker"
+import { applyEvent, confirmReshuffle, createInitialTrackerState, undoLastEvent } from "../src/tracker"
 import type { ParsedLogEvent } from "../src/types"
 
 function createEvent(partial: Partial<ParsedLogEvent>): ParsedLogEvent {
@@ -17,6 +17,8 @@ function createEvent(partial: Partial<ParsedLogEvent>): ParsedLogEvent {
     confidence: partial.confidence ?? 0.99,
     source: partial.source ?? "manual",
     status: partial.status ?? "accepted",
+    quality: partial.quality ?? "strict",
+    autoAcceptable: partial.autoAcceptable ?? true,
     supportStatus: partial.supportStatus,
     note: partial.note,
     fingerprint: partial.fingerprint ?? partial.rawText ?? "黄月英对周泰（您）使用过河拆桥",
@@ -28,35 +30,17 @@ describe("tracker", () => {
   it("uses the 1v1 deck by default in tests", () => {
     const state = createInitialTrackerState(oneVOneDeckProfile)
 
-    expect(state.remainingCounts["杀"]).toBe(16)
-    expect(Object.values(state.remainingCounts).reduce((sum, count) => sum + count, 0)).toBe(52)
+    expect(state.cycleRemainingCounts["杀"]).toBe(16)
+    expect(Object.values(state.cycleRemainingCounts).reduce((sum, count) => sum + count, 0)).toBe(52)
   })
 
-  it("updates seen count after accepted 过河拆桥", () => {
+  it("updates cycle and history counts after accepted use 闪", () => {
     const state = createInitialTrackerState(oneVOneDeckProfile)
-    const nextState = applyEvent(state, createEvent({ cardName: "过河拆桥" }))
+    const nextState = applyEvent(state, createEvent({ id: "flash", rawText: "郭嘉使用闪", playerName: "郭嘉", cardName: "闪" }))
 
-    expect(nextState.seenCounts["过河拆桥"]).toBe(1)
-    expect(nextState.remainingCounts["过河拆桥"]).toBe(2)
-  })
-
-  it("updates seen count after accepted 闪", () => {
-    const state = createInitialTrackerState(oneVOneDeckProfile)
-    const nextState = applyEvent(
-      state,
-      createEvent({
-        id: "event-flash",
-        rawText: "郭嘉使用闪",
-        normalizedText: "郭嘉使用闪",
-        normalizedRawText: "郭嘉使用闪",
-        playerName: "郭嘉",
-        cardName: "闪",
-        fingerprint: "郭嘉使用闪"
-      })
-    )
-
-    expect(nextState.seenCounts["闪"]).toBe(1)
-    expect(nextState.remainingCounts["闪"]).toBe(7)
+    expect(nextState.cycleSeenCounts["闪"]).toBe(1)
+    expect(nextState.historySeenCounts["闪"]).toBe(1)
+    expect(nextState.cycleRemainingCounts["闪"]).toBe(7)
   })
 
   it("does not update ignored events", () => {
@@ -66,16 +50,15 @@ describe("tracker", () => {
       createEvent({
         id: "ignored",
         rawText: "黄月英发动集智",
-        normalizedText: "黄月英发动集智",
-        normalizedRawText: "黄月英发动集智",
         action: "ignore",
         cardName: undefined,
         status: "ignored",
-        fingerprint: "黄月英发动集智"
+        quality: "ignored",
+        autoAcceptable: false
       })
     )
 
-    expect(nextState.seenCounts["过河拆桥"]).toBe(0)
+    expect(nextState.cycleSeenCounts["过河拆桥"]).toBe(0)
     expect(nextState.recentEvents).toHaveLength(0)
   })
 
@@ -86,64 +69,116 @@ describe("tracker", () => {
       createEvent({
         id: "unsupported",
         rawText: "黄盖使用酒",
-        normalizedText: "黄盖使用酒",
-        normalizedRawText: "黄盖使用酒",
         playerName: "黄盖",
-        cardName: "酒",
-        fingerprint: "黄盖使用酒"
+        cardName: "酒"
       })
     )
 
-    expect(nextState.seenCounts["酒"]).toBeUndefined()
-    expect(nextState.events[0]).toMatchObject({ supportStatus: "unsupported" })
+    expect(nextState.cycleSeenCounts["酒"]).toBeUndefined()
+    expect(nextState.events[0]).toMatchObject({ supportStatus: "unsupported", quality: "unsupported" })
     expect(nextState.recentEvents).toHaveLength(0)
   })
 
-  it("undoLastEvent restores counts", () => {
-    const state = applyEvent(createInitialTrackerState(oneVOneDeckProfile), createEvent({ cardName: "闪" }))
-    const undoneState = undoLastEvent(state)
+  it("tracks gainKnown cards by player", () => {
+    const state = createInitialTrackerState(oneVOneDeckProfile)
+    const nextState = applyEvent(
+      state,
+      createEvent({
+        id: "gain-known",
+        rawText: "郭嘉（您）从摸牌堆获得过河拆桥",
+        playerName: "郭嘉（您）",
+        action: "gainKnown",
+        cardName: "过河拆桥"
+      })
+    )
 
-    expect(undoneState.seenCounts["闪"]).toBe(0)
-    expect(undoneState.remainingCounts["闪"]).toBe(8)
+    expect(nextState.cycleSeenCounts["过河拆桥"]).toBe(1)
+    expect(nextState.knownCardsByPlayer["郭嘉（您）"]?.["过河拆桥"]).toBe(1)
   })
 
-  it("keeps remaining counts non-negative", () => {
+  it("consumes known hand card without double-counting later use", () => {
     let state = createInitialTrackerState(oneVOneDeckProfile)
-    for (let index = 0; index < 10; index += 1) {
-      state = applyEvent(
-        state,
-        createEvent({
-          id: `flash-${index}`,
-          rawText: `郭嘉使用闪${index}`,
-          normalizedText: `郭嘉使用闪${index}`,
-          normalizedRawText: `郭嘉使用闪${index}`,
-          cardName: "闪",
-          fingerprint: `郭嘉使用闪${index}`
-        })
-      )
-    }
+    state = applyEvent(
+      state,
+      createEvent({
+        id: "gain-known",
+        playerName: "郭嘉（您）",
+        action: "gainKnown",
+        cardName: "过河拆桥"
+      })
+    )
+    state = applyEvent(
+      state,
+      createEvent({
+        id: "use-known",
+        rawText: "郭嘉（您）对周泰使用过河拆桥",
+        playerName: "郭嘉（您）",
+        targetName: "周泰",
+        action: "use",
+        cardName: "过河拆桥"
+      })
+    )
 
-    expect(state.remainingCounts["闪"]).toBe(0)
+    expect(state.cycleSeenCounts["过河拆桥"]).toBe(1)
+    expect(state.historySeenCounts["过河拆桥"]).toBe(1)
+    expect(state.knownCardsByPlayer["郭嘉（您）"]?.["过河拆桥"]).toBeUndefined()
+    expect(state.events.find((event) => event.id === "use-known")).toMatchObject({ impactCount: 0 })
   })
 
-  it("marks over-seen cards", () => {
+  it("counts judge cards as newly seen", () => {
+    const state = applyEvent(
+      createInitialTrackerState(oneVOneDeckProfile),
+      createEvent({
+        id: "judge",
+        action: "judge",
+        cardName: "寒冰剑"
+      })
+    )
+
+    expect(state.cycleSeenCounts["寒冰剑"]).toBe(1)
+  })
+
+  it("confirm reshuffle resets cycle counts and keeps history", () => {
+    const state = applyEvent(createInitialTrackerState(oneVOneDeckProfile), createEvent({ id: "flash", cardName: "闪" }))
+    const reshuffled = confirmReshuffle(state)
+
+    expect(reshuffled.cycleId).toBe(2)
+    expect(reshuffled.cycleSeenCounts["闪"]).toBe(0)
+    expect(reshuffled.historySeenCounts["闪"]).toBe(1)
+  })
+
+  it("does not warn when only history exceeds total counts", () => {
     let state = createInitialTrackerState(oneVOneDeckProfile)
-    for (let index = 0; index < 10; index += 1) {
-      state = applyEvent(
-        state,
-        createEvent({
-          id: `flash-over-${index}`,
-          rawText: `郭嘉打出闪${index}`,
-          normalizedText: `郭嘉打出闪${index}`,
-          normalizedRawText: `郭嘉打出闪${index}`,
-          action: "play",
-          cardName: "闪",
-          fingerprint: `郭嘉打出闪${index}`
-        })
-      )
+    for (let index = 0; index < 9; index += 1) {
+      state = applyEvent(state, createEvent({ id: `flash-${index}`, cardName: "闪", rawText: `郭嘉使用闪${index}` }))
+    }
+    state = confirmReshuffle(state)
+
+    expect(state.historySeenCounts["闪"]).toBe(9)
+    expect(state.warnings).toHaveLength(0)
+  })
+
+  it("warns only when cycle counts exceed total counts", () => {
+    let state = createInitialTrackerState(oneVOneDeckProfile)
+    for (let index = 0; index < 9; index += 1) {
+      state = applyEvent(state, createEvent({ id: `flash-over-${index}`, cardName: "闪", rawText: `郭嘉打出闪${index}`, action: "play" }))
     }
 
-    expect(state.seenCounts["闪"]).toBe(10)
-    expect(state.overSeenWarnings["闪"]).toBe(2)
+    expect(state.cycleSeenCounts["闪"]).toBe(9)
+    expect(state.warnings.find((warning) => warning.cardName === "闪")).toBeTruthy()
+  })
+
+  it("undoLastEvent restores counts and known cards", () => {
+    let state = createInitialTrackerState(oneVOneDeckProfile)
+    state = applyEvent(state, createEvent({ id: "gain-known", playerName: "郭嘉（您）", action: "gainKnown", cardName: "过河拆桥" }))
+    state = applyEvent(state, createEvent({ id: "use-known", playerName: "郭嘉（您）", action: "use", cardName: "过河拆桥" }))
+
+    const undoneUse = undoLastEvent(state)
+    expect(undoneUse.knownCardsByPlayer["郭嘉（您）"]?.["过河拆桥"]).toBe(1)
+    expect(undoneUse.cycleSeenCounts["过河拆桥"]).toBe(1)
+
+    const undoneGain = undoLastEvent(undoneUse)
+    expect(undoneGain.knownCardsByPlayer["郭嘉（您）"]?.["过河拆桥"]).toBeUndefined()
+    expect(undoneGain.cycleSeenCounts["过河拆桥"]).toBe(0)
   })
 })

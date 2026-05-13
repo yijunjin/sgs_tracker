@@ -2,11 +2,16 @@ import { computed, ref } from "vue"
 import {
   acceptEvent,
   applyEvent,
+  confirmReshuffle,
   createInitialTrackerState,
   defaultDeckProfile,
   deckProfiles,
+  dismissReshuffleAlert,
   rejectEvent,
+  setManualDeckRemaining,
+  undoEvent,
   undoLastEvent,
+  updateDeckRemainingState,
   type DeckProfile,
   type ParsedLogEvent,
   type TrackerState
@@ -96,15 +101,17 @@ export function useTrackerSession() {
     trackerState.value = applyEvent(trackerState.value, nextEvent)
   }
 
-  async function acceptAllHighConfidence(threshold = 0.85): Promise<void> {
+  async function acceptAllStrictEvents(): Promise<void> {
     const candidates = trackerState.value.events.filter(
       (event) =>
         event.status === "pending" &&
-        event.confidence >= threshold &&
+        event.quality === "strict" &&
+        event.autoAcceptable &&
         Boolean(event.cardName) &&
         event.supportStatus !== "unsupported" &&
         event.action !== "ignore" &&
-        event.action !== "unknown"
+        event.action !== "unknown" &&
+        !event.duplicate
     )
 
     for (const event of candidates) {
@@ -121,6 +128,15 @@ export function useTrackerSession() {
     trackerState.value = undoLastEvent(trackerState.value)
   }
 
+  async function undoOne(eventId: string): Promise<void> {
+    if (runtimeMode.value === "remote") {
+      runtimeMode.value = "local"
+      sessionId.value = null
+    }
+
+    trackerState.value = undoEvent(trackerState.value, eventId)
+  }
+
   async function reset(): Promise<void> {
     if (runtimeMode.value === "remote" && sessionId.value) {
       trackerState.value = await apiClient.reset(sessionId.value)
@@ -128,6 +144,26 @@ export function useTrackerSession() {
     }
 
     trackerState.value = createInitialTrackerState(deckProfile.value)
+  }
+
+  function updateDeckRemaining(stableRemaining: number | undefined, rawText?: string): void {
+    trackerState.value = updateDeckRemainingState(trackerState.value, stableRemaining, rawText)
+  }
+
+  function confirmPendingReshuffle(): void {
+    trackerState.value = confirmReshuffle(trackerState.value, trackerState.value.pendingReshuffleAlert?.id)
+  }
+
+  function dismissPendingReshuffle(): void {
+    trackerState.value = dismissReshuffleAlert(trackerState.value)
+  }
+
+  function markManualReshuffle(): void {
+    trackerState.value = confirmReshuffle(trackerState.value)
+  }
+
+  function correctDeckRemaining(value: number): void {
+    trackerState.value = setManualDeckRemaining(trackerState.value, value)
   }
 
   function switchDeckProfile(profileId: string): void {
@@ -159,9 +195,16 @@ export function useTrackerSession() {
     init,
     ingestParsedEvents,
     updateEventStatus,
-    acceptAllHighConfidence,
+    acceptAllHighConfidence: acceptAllStrictEvents,
+    acceptAllStrictEvents,
     switchDeckProfile,
+    updateDeckRemaining,
+    confirmPendingReshuffle,
+    dismissPendingReshuffle,
+    markManualReshuffle,
+    correctDeckRemaining,
     undo,
+    undoOne,
     reset
   }
 }

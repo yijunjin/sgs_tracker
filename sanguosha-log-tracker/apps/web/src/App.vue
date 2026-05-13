@@ -1,6 +1,26 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue"
-import { createVisibleLogDeduper, mergeBrokenOcrLines, parseLogInput, type OcrLine } from "@slt/shared"
+import {
+  createAutoGameSessionState,
+  createDeckRemainingSamplerState,
+  createVisibleLogDeduper,
+  defaultAutoListenConfig,
+  enterErrorMode,
+  enterGuardMode,
+  enterIdleMode,
+  enterMidGameMode,
+  enterPausedMode,
+  getDeckTotalCount,
+  mergeBrokenOcrLines,
+  parseDeckRemainingFromText,
+  parseLogInput,
+  processAutoListenBatch,
+  updateDeckRemainingSample,
+  type AutoGameSessionState,
+  type AutoListenConfig,
+  type OcrLine,
+  type ParsedLogEvent
+} from "@slt/shared"
 
 import CapturePanel from "./components/CapturePanel.vue"
 import CropPreview from "./components/CropPreview.vue"
@@ -9,7 +29,7 @@ import OcrPanel from "./components/OcrPanel.vue"
 import ParsedEventsPanel from "./components/ParsedEventsPanel.vue"
 import RecentEvents from "./components/RecentEvents.vue"
 import { useOcr } from "./composables/useOcr"
-import { useScreenCapture } from "./composables/useScreenCapture"
+import { cropDeckCountCanvas, prepareDeckCountOcrCanvas, useScreenCapture } from "./composables/useScreenCapture"
 import { useTrackerSession } from "./composables/useTrackerSession"
 
 const screen = useScreenCapture()
@@ -17,15 +37,28 @@ const ocr = useOcr()
 const session = useTrackerSession()
 const capturePanelRef = ref<{ getVideoElement: () => HTMLVideoElement | null } | null>(null)
 
-const captureIntervalMs = 300
-const minOcrIntervalMs = 1200
-const stableDelayMs = 400
 const diffThreshold = 6
 const visibleLogDeduper = createVisibleLogDeduper()
+const deckRemainingSampler = createDeckRemainingSamplerState()
+const autoListenConfig = ref<AutoListenConfig>({ ...defaultAutoListenConfig })
+const autoSessionState = ref<AutoGameSessionState>(createAutoGameSessionState())
 const autoListening = ref(false)
 const autoStatus = ref("未启动")
 const autoError = ref("")
 const lastOcrAt = ref("")
+const onlyNewVisibleLines = ref(true)
+const deckRemainingRawText = ref("")
+const ocrMetrics = ref({
+  rawLineCount: 0,
+  mergedLineCount: 0,
+  newLineCount: 0,
+  ignoredLineCount: 0,
+  strictEventCount: 0,
+  ambiguousEventCount: 0,
+  unsupportedEventCount: 0,
+  duplicateSkippedCount: 0,
+  lastOcrDurationMs: 0
+})
 let autoTimer: number | undefined
 let lastOcrAtMs = 0
 let dirtyAtMs = 0
@@ -42,6 +75,34 @@ const apiStatusLabel = computed(() => {
   }
 })
 
+const autoModeLabel = computed(() => {
+  switch (autoSessionState.value.mode) {
+    case "armed":
+      return "守护中，等待开局"
+    case "gameStarting":
+      return "检测到开局"
+    case "inGame":
+      return "正式监听中"
+    case "paused":
+      return "已暂停"
+    case "error":
+      return "错误"
+    default:
+      return "未启动"
+  }
+})
+
+const autoModeNote = computed(() => {
+  if (autoSessionState.value.mode === "inGame" && autoSessionState.value.startMode === "midGame") {
+    return "中途接入：仅统计开启后的公开日志。"
+  }
+
+  return ""
+})
+
+const latestStartSignal = computed(() => autoSessionState.value.lastStartSignal?.chooseLines.join(" | ") ?? "")
+const currentGameStartSignature = computed(() => autoSessionState.value.currentGameStartSignature ?? "")
+
 async function parseCurrentText(source: "ocr" | "manual" | "mock"): Promise<void> {
   if (!ocr.text.value.trim()) {
     ocr.setError("当前没有可解析文本。请先运行 OCR 或粘贴日志文本。")
@@ -55,6 +116,54 @@ async function parseCurrentText(source: "ocr" | "manual" | "mock"): Promise<void
 
 function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString()
+}
+
+function updateOcrMetrics(
+  rawLines: OcrLine[],
+  mergedLines: OcrLine[],
+  parsedLineCount: number,
+  events: ParsedLogEvent[],
+  duplicateSkippedCount: number,
+  durationMs: number
+): void {
+  ocrMetrics.value = {
+    ...ocrMetrics.value,
+    rawLineCount: rawLines.length,
+    mergedLineCount: mergedLines.length,
+    newLineCount: parsedLineCount,
+    ignoredLineCount: events.filter((event) => event.quality === "ignored").length,
+    strictEventCount: events.filter((event) => event.quality === "strict").length,
+    ambiguousEventCount: events.filter((event) => event.quality === "ambiguous").length,
+    unsupportedEventCount: events.filter((event) => event.quality === "unsupported").length,
+    duplicateSkippedCount,
+    lastOcrDurationMs: durationMs
+  }
+}
+
+function primeVisibleLogBaseline(lines: OcrLine[]): void {
+  visibleLogDeduper.reset()
+  visibleLogDeduper.getNewLines(lines)
+}
+
+function stopAutoTimerOnly(): void {
+  if (autoTimer) {
+    window.clearInterval(autoTimer)
+    autoTimer = undefined
+  }
+
+  autoListening.value = false
+}
+
+function startAutoTimerIfNeeded(): void {
+  if (autoListening.value) {
+    return
+  }
+
+  autoError.value = ""
+  previousFingerprint = undefined
+  dirtyAtMs = 0
+  autoListening.value = true
+  autoTimer = window.setInterval(tickAutoListening, autoListenConfig.value.captureIntervalMs)
 }
 
 function createImageFingerprint(canvas: HTMLCanvasElement): Uint8ClampedArray {
@@ -103,8 +212,41 @@ async function ingestOcrLines(
   const mergedLines = mergeBrokenOcrLines(rawLines, session.deckProfile.value)
   ocr.setRecognitionResult(rawLines, mergedLines)
   const linesForParse = onlyNewVisibleLines ? visibleLogDeduper.getNewLines(mergedLines) : mergedLines
+  const dedupeStats = visibleLogDeduper.getLastStats()
   const events = parseLogInput(linesForParse, source, session.deckProfile.value)
+  ocrMetrics.value = {
+    ...ocrMetrics.value,
+    rawLineCount: rawLines.length,
+    mergedLineCount: mergedLines.length,
+    newLineCount: linesForParse.length,
+    ignoredLineCount: events.filter((event) => event.quality === "ignored").length,
+    strictEventCount: events.filter((event) => event.quality === "strict").length,
+    ambiguousEventCount: events.filter((event) => event.quality === "ambiguous").length,
+    unsupportedEventCount: events.filter((event) => event.quality === "unsupported").length,
+    duplicateSkippedCount: onlyNewVisibleLines ? dedupeStats.duplicateSkippedCount : 0
+  }
   await session.ingestParsedEvents(events)
+}
+
+async function runDeckRemainingOcr(sourceCanvas: HTMLCanvasElement | null, allowAutoConfirm = false): Promise<void> {
+  if (!sourceCanvas) {
+    return
+  }
+
+  const deckTotal = getDeckTotalCount(session.deckProfile.value)
+  const cropped = cropDeckCountCanvas(sourceCanvas, screen.deckCountCropRect.value)
+  const prepared = prepareDeckCountOcrCanvas(cropped)
+  screen.refreshDeckCountPreview(sourceCanvas)
+  const lines = await ocr.recognizeOnly(prepared)
+  const rawText = lines.map((line) => line.text).join("")
+  deckRemainingRawText.value = rawText
+  const rawRemaining = parseDeckRemainingFromText(rawText, deckTotal)
+  const sample = updateDeckRemainingSample(deckRemainingSampler, rawRemaining, deckTotal)
+  session.updateDeckRemaining(sample.stableRemaining, rawText)
+
+  if (allowAutoConfirm && !autoListenConfig.value.requireConfirmReshuffle && session.trackerState.value.pendingReshuffleAlert?.status === "pending") {
+    session.confirmPendingReshuffle()
+  }
 }
 
 async function runRealOcr(): Promise<void> {
@@ -115,10 +257,16 @@ async function runRealOcr(): Promise<void> {
   }
 
   try {
+    const startedAt = performance.now()
     const lines = await ocr.runRealOcr(canvas)
-    await ingestOcrLines(lines, "ocr", true)
+    await ingestOcrLines(lines, "ocr", onlyNewVisibleLines.value)
+    await runDeckRemainingOcr(screen.activeSourceCanvas.value)
     lastOcrAtMs = Date.now()
     lastOcrAt.value = formatTime(lastOcrAtMs)
+    ocrMetrics.value = {
+      ...ocrMetrics.value,
+      lastOcrDurationMs: Math.round(performance.now() - startedAt)
+    }
   } catch {
     return
   }
@@ -135,17 +283,91 @@ async function runAutoOcr(canvas: HTMLCanvasElement): Promise<void> {
   }
 
   try {
+    const startedAt = performance.now()
     autoStatus.value = "OCR 中"
     autoError.value = ""
-    const lines = await ocr.runRealOcr(canvas)
-    await ingestOcrLines(lines, "ocr", true)
+    const rawLines = await ocr.runRealOcr(canvas)
+    const mergedLines = mergeBrokenOcrLines(rawLines, session.deckProfile.value)
+    ocr.setRecognitionResult(rawLines, mergedLines)
+
+    let linesForBatch = mergedLines
+    let duplicateSkippedCount = 0
+    const stateBeforeBatch = autoSessionState.value
+    const shouldPrimeMidGame =
+      stateBeforeBatch.mode === "inGame" && stateBeforeBatch.startMode === "midGame" && stateBeforeBatch.baselineStatus !== "complete"
+
+    if (stateBeforeBatch.mode === "inGame" && !shouldPrimeMidGame) {
+      linesForBatch = visibleLogDeduper.getNewLines(mergedLines)
+      duplicateSkippedCount = visibleLogDeduper.getLastStats().duplicateSkippedCount
+    }
+
+    const result = processAutoListenBatch({
+      state: stateBeforeBatch,
+      lines: linesForBatch,
+      deckProfile: session.deckProfile.value,
+      config: autoListenConfig.value,
+      now: Date.now()
+    })
+
+    if (stateBeforeBatch.mode === "armed" && result.resetTracker) {
+      autoSessionState.value = {
+        ...result.nextState,
+        mode: "gameStarting"
+      }
+      autoStatus.value = "检测到开局，正在重置本局"
+      await session.reset()
+      primeVisibleLogBaseline(mergedLines)
+      await session.ingestParsedEvents(result.events)
+      autoSessionState.value = result.nextState
+      updateOcrMetrics(
+        rawLines,
+        mergedLines,
+        Math.max(0, mergedLines.length - (Math.max(...(result.signal?.chooseLineIndexes ?? [-1])) + 1)),
+        result.events,
+        0,
+        Math.round(performance.now() - startedAt)
+      )
+      const videoElement = capturePanelRef.value?.getVideoElement() ?? null
+      await runDeckRemainingOcr(screen.captureCurrentSourceFrame(videoElement), true)
+      autoStatus.value = result.autoAcceptedEventIds.length > 0 ? `正式监听中，已自动接受 ${result.autoAcceptedEventIds.length} 条 strict 事件` : "正式监听中"
+    } else if (result.primedLineCount > 0) {
+      primeVisibleLogBaseline(mergedLines)
+      autoSessionState.value = result.nextState
+      updateOcrMetrics(rawLines, mergedLines, 0, [], 0, Math.round(performance.now() - startedAt))
+      autoStatus.value = "中途接入基线已建立，后续只统计新增公开日志"
+    } else {
+      autoSessionState.value = result.nextState
+      if (result.events.length > 0) {
+        await session.ingestParsedEvents(result.events)
+      }
+      if (result.nextState.mode === "inGame") {
+        const videoElement = capturePanelRef.value?.getVideoElement() ?? null
+        await runDeckRemainingOcr(screen.captureCurrentSourceFrame(videoElement), true)
+      }
+      updateOcrMetrics(
+        rawLines,
+        mergedLines,
+        linesForBatch.length,
+        result.events,
+        duplicateSkippedCount,
+        Math.round(performance.now() - startedAt)
+      )
+      if (result.nextState.mode === "armed") {
+        autoStatus.value = result.signal ? "已检测到开局候选，请手动开始新局或开启自动开局" : "守护中，等待开局"
+      } else {
+        autoStatus.value = result.autoAcceptedEventIds.length > 0 ? `正式监听中，已自动接受 ${result.autoAcceptedEventIds.length} 条 strict 事件` : "正式监听中"
+      }
+    }
+
+    const videoElement = capturePanelRef.value?.getVideoElement() ?? null
     lastOcrAtMs = Date.now()
     lastOcrAt.value = formatTime(lastOcrAtMs)
     dirtyAtMs = 0
-    autoStatus.value = "监听中"
   } catch (error) {
     autoError.value = error instanceof Error ? error.message : "自动 OCR 失败。"
-    stopAutoListening()
+    autoSessionState.value = enterErrorMode(autoSessionState.value)
+    autoStatus.value = "自动 OCR 失败"
+    stopAutoTimerOnly()
   }
 }
 
@@ -172,35 +394,66 @@ function tickAutoListening(): void {
 
   previousFingerprint = fingerprint
 
-  const isStable = dirtyAtMs > 0 && now - dirtyAtMs >= stableDelayMs
-  const isOcrIntervalReady = now - lastOcrAtMs >= minOcrIntervalMs
+  const isStable = dirtyAtMs > 0 && now - dirtyAtMs >= autoListenConfig.value.stableDelayMs
+  const isOcrIntervalReady = now - lastOcrAtMs >= autoListenConfig.value.minOcrIntervalMs
   if (isStable && isOcrIntervalReady && !ocr.isRecognizing.value) {
     void runAutoOcr(canvas)
   }
 }
 
 function startAutoListening(): void {
-  if (autoListening.value) {
+  if (autoListening.value && autoSessionState.value.mode === "armed") {
     return
   }
 
-  autoError.value = ""
-  previousFingerprint = undefined
-  dirtyAtMs = 0
-  autoListening.value = true
-  autoStatus.value = "监听中"
-  autoTimer = window.setInterval(tickAutoListening, captureIntervalMs)
+  autoSessionState.value = enterGuardMode(autoSessionState.value)
+  autoStatus.value = "守护中，等待开局"
+  startAutoTimerIfNeeded()
   tickAutoListening()
 }
 
-function stopAutoListening(): void {
-  if (autoTimer) {
-    window.clearInterval(autoTimer)
-    autoTimer = undefined
-  }
+function stopAutoListening(mode: "paused" | "idle" = "paused"): void {
+  stopAutoTimerOnly()
+  autoSessionState.value = mode === "idle" ? enterIdleMode(autoSessionState.value) : enterPausedMode(autoSessionState.value)
+  autoStatus.value = mode === "idle" ? "未启动" : autoError.value ? "错误" : "已暂停"
+}
 
-  autoListening.value = false
-  autoStatus.value = autoError.value ? "已停止（OCR 错误）" : "已停止"
+async function startManualNewGame(): Promise<void> {
+  autoError.value = ""
+  startAutoTimerIfNeeded()
+  autoSessionState.value = {
+    ...autoSessionState.value,
+    mode: "gameStarting",
+    hasEnteredInGame: true,
+    startMode: "newGame",
+    baselineStatus: "complete",
+    currentGameStartSignature: undefined,
+    lastGameStartDetectedAt: Date.now()
+  }
+  autoStatus.value = "手动开始新局，正在重置本局"
+  await session.reset()
+  const currentLines = ocr.mergedLines.value.length > 0 ? ocr.mergedLines.value : ocr.lines.value
+  primeVisibleLogBaseline(currentLines)
+  autoSessionState.value = {
+    ...autoSessionState.value,
+    mode: "inGame"
+  }
+  autoStatus.value = "正式监听中"
+  tickAutoListening()
+}
+
+function startMidGameListening(): void {
+  autoError.value = ""
+  visibleLogDeduper.reset()
+  autoSessionState.value = enterMidGameMode(autoSessionState.value)
+  autoStatus.value = "中途接入：等待下一次稳定 OCR 建立基线"
+  startAutoTimerIfNeeded()
+  tickAutoListening()
+}
+
+function stopCaptureSource(): void {
+  screen.stopDisplayCapture()
+  stopAutoListening("idle")
 }
 
 async function reprocessCurrentScreenshot(): Promise<void> {
@@ -208,6 +461,16 @@ async function reprocessCurrentScreenshot(): Promise<void> {
   const lines = ocr.mergedLines.value.length > 0 ? ocr.mergedLines.value : ocr.lines.value
   const linesForParse = visibleLogDeduper.getNewLines(lines)
   const events = parseLogInput(linesForParse, "ocr", session.deckProfile.value)
+  const dedupeStats = visibleLogDeduper.getLastStats()
+  ocrMetrics.value = {
+    ...ocrMetrics.value,
+    newLineCount: linesForParse.length,
+    duplicateSkippedCount: dedupeStats.duplicateSkippedCount,
+    ignoredLineCount: events.filter((event) => event.quality === "ignored").length,
+    strictEventCount: events.filter((event) => event.quality === "strict").length,
+    ambiguousEventCount: events.filter((event) => event.quality === "ambiguous").length,
+    unsupportedEventCount: events.filter((event) => event.quality === "unsupported").length
+  }
   await session.ingestParsedEvents(events)
   autoStatus.value = "已重新处理当前截图"
 }
@@ -222,7 +485,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  stopAutoListening()
+  stopAutoListening("idle")
 })
 </script>
 
@@ -262,16 +525,19 @@ onBeforeUnmount(() => {
             ref="capturePanelRef"
             :stream="screen.stream.value"
             :crop-rect="screen.cropRect.value"
+            :deck-count-crop-rect="screen.deckCountCropRect.value"
             :preprocess-enabled="screen.preprocessEnabled.value"
             :capture-error="screen.captureError.value"
             :source-label="screen.sourceLabel.value"
             :has-source="screen.hasSource.value"
             @start-capture="screen.startDisplayCapture"
-            @stop-capture="screen.stopDisplayCapture"
+            @stop-capture="stopCaptureSource"
             @capture-frame="screen.captureCurrentFrame($event)"
             @upload-file="screen.loadImageFile"
             @generate-sample="screen.generateSampleImage"
             @update-crop="screen.updateCropRect"
+            @update-deck-count-crop="screen.updateDeckCountCropRect"
+            @reset-deck-count-crop="screen.resetDeckCountCropRect"
             @apply-crop="screen.refreshDerivedCanvases"
             @update:preprocess-enabled="screen.preprocessEnabled.value = $event"
           />
@@ -280,6 +546,8 @@ onBeforeUnmount(() => {
             :original-src="screen.originalPreviewUrl.value"
             :cropped-src="screen.croppedPreviewUrl.value"
             :processed-src="screen.processedPreviewUrl.value"
+            :deck-count-cropped-src="screen.deckCountCroppedPreviewUrl.value"
+            :deck-count-processed-src="screen.deckCountProcessedPreviewUrl.value"
           />
         </div>
 
@@ -294,18 +562,39 @@ onBeforeUnmount(() => {
             :has-canvas="Boolean(screen.activeCanvas.value)"
             :has-auto-source="Boolean(screen.stream.value)"
             :auto-listening="autoListening"
+            :auto-mode-label="autoModeLabel"
             :auto-status="autoStatus"
+            :auto-mode-note="autoModeNote"
             :is-ocr-running="ocr.isRecognizing.value"
             :last-ocr-at="lastOcrAt"
             :auto-error="autoError"
+            :only-new-visible-lines="onlyNewVisibleLines"
+            :deck-remaining-raw-text="deckRemainingRawText"
+            :stable-deck-remaining="session.trackerState.value.lastStableDeckRemaining"
+            :auto-start-on-choose-general="autoListenConfig.autoStartOnChooseGeneral"
+            :auto-reset-on-new-game="autoListenConfig.autoResetOnNewGame"
+            :auto-accept-strict-events="autoListenConfig.autoAcceptStrictEvents"
+            :require-confirm-reshuffle="autoListenConfig.requireConfirmReshuffle"
+            :choose-line-count="autoSessionState.lastChooseLineCount"
+            :last-start-signal="latestStartSignal"
+            :current-game-start-signature="currentGameStartSignature"
+            :has-entered-in-game="autoSessionState.hasEnteredInGame"
+            :metrics="ocrMetrics"
             @run-real="runRealOcr"
             @run-mock="runMockOcr"
             @parse-text="parseCurrentText('manual')"
             @start-auto="startAutoListening"
             @stop-auto="stopAutoListening"
+            @force-new-game="startManualNewGame"
+            @enter-mid-game="startMidGameListening"
             @reprocess-current="reprocessCurrentScreenshot"
             @clear-dedupe="clearDedupeCache"
             @update:manual-text="ocr.setText"
+            @update:only-new-visible-lines="onlyNewVisibleLines = $event"
+            @update:auto-start-on-choose-general="autoListenConfig.autoStartOnChooseGeneral = $event"
+            @update:auto-reset-on-new-game="autoListenConfig.autoResetOnNewGame = $event"
+            @update:auto-accept-strict-events="autoListenConfig.autoAcceptStrictEvents = $event"
+            @update:require-confirm-reshuffle="autoListenConfig.requireConfirmReshuffle = $event"
           />
 
           <ParsedEventsPanel
@@ -320,15 +609,19 @@ onBeforeUnmount(() => {
           <DeckPanel
             :deck-profile="session.deckProfile.value"
             :deck-profiles="session.deckProfiles"
-            :seen-counts="session.trackerState.value.seenCounts"
-            :remaining-counts="session.trackerState.value.remainingCounts"
-            :over-seen-warnings="session.trackerState.value.overSeenWarnings"
+            :tracker-state="session.trackerState.value"
             @change-deck="session.switchDeckProfile"
+            @confirm-reshuffle="session.confirmPendingReshuffle"
+            @dismiss-reshuffle="session.dismissPendingReshuffle"
+            @manual-reshuffle="session.markManualReshuffle"
+            @correct-deck-remaining="session.correctDeckRemaining"
           />
 
           <RecentEvents
             :recent-events="session.trackerState.value.recentEvents"
             @undo="session.undo"
+            @undo-event="session.undoOne"
+            @mark-misrecognized="session.updateEventStatus($event, 'rejected')"
             @reset="session.reset"
           />
         </div>

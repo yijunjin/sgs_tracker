@@ -1,13 +1,23 @@
-import { defaultDeckProfile, isCardInDeck, isKnownCardName } from "./cards"
-import { findCardNameByLongestMatch, findKnownCardNameByLongestMatch, normalizeCardName, normalizeSuit, normalizeText } from "./normalize"
-import type { DeckProfile, OcrLine, ParsedLogEvent } from "./types"
+import { defaultDeckProfile, isCardInDeck, isKnownCardName, KNOWN_CARD_NAMES } from "./cards"
+import {
+  findCardNameByLongestMatch,
+  findKnownCardNameByLongestMatch,
+  normalizeCardName,
+  normalizeSuit,
+  normalizeText
+} from "./normalize"
+import { isChooseGeneralLine } from "./startSignal"
+import type { DeckProfile, OcrLine, ParsedLogEvent, ParseQuality } from "./types"
 
 const BRACKETED_CARD_PATTERN =
   /^(?<player>.+?)(?<verb>使用了|使用|打出了|打出|弃置了|弃置|装备了|装备|判定牌为)【(?<content>.+?)】$/u
 const CONVERT_PATTERN = /^(?<player>.+?)将【(?<from>.+?)】当【(?<to>.+?)】使用$/u
 const TARGET_USE_PATTERN = /^(?<player>.+?)对(?<target>.+?)使用(?<content>.+)$/u
+const LET_EQUIP_PATTERN = /^(?<player>.+?)让(?<target>.+?)装备(?<content>.+)$/u
 const DIRECT_ACTION_PATTERN = /^(?<player>.+?)(?<verb>使用|打出|弃置|装备)(?<content>.+)$/u
 const JUDGE_RESULT_PATTERN = /^(?<player>.+?)的(?<judgeName>.+?)判定结果是(?<content>.+)$/u
+const GAIN_KNOWN_PATTERN = /^(?<player>.+?)从摸牌堆获得(?<content>.+)$/u
+const DRAW_NUMBER_PATTERN = /^(?<player>.+?)(?:从摸牌堆)?获得[1-9]\d*张牌$/u
 const SUIT_RANK_CARD_PATTERN = /^(?<suit>黑桃|红桃|梅花|方片|方块)?(?<rank>A|10|[2-9JQK])?\s*(?<card>.+)$/u
 const SUIT_ONLY_PATTERN = /(黑桃|红桃|梅花|方片|方块)(A|10|[2-9JQK])?$/u
 
@@ -15,11 +25,10 @@ const IGNORE_PATTERNS = [
   "观看牌堆顶",
   "牌堆顶",
   "置于牌堆顶",
-  "从摸牌堆获得",
-  "获得1张牌",
-  "获得2张牌",
-  "获得3张牌",
   "摸牌",
+  "回复1点体力",
+  "体力值为",
+  "受到1点伤害",
   "发动集智",
   "发动空城",
   "发动技能",
@@ -30,6 +39,8 @@ const IGNORE_PATTERNS = [
   "开放聊天",
   "使用道具"
 ]
+
+const ACTION_KEYWORDS = ["使用", "打出", "弃置", "装备", "判定结果是", "从摸牌堆获得", "获得", "发动", "生效"]
 
 function createEventId(seed: string, index: number): string {
   const suffix = `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`
@@ -79,10 +90,19 @@ function actionFromVerb(verb: string): ParsedLogEvent["action"] {
   return "unknown"
 }
 
-function applyDeckSupport(
-  event: ParsedLogEvent,
-  deckProfile: DeckProfile
+function withQuality(
+  event: Omit<ParsedLogEvent, "quality" | "autoAcceptable">,
+  quality: ParseQuality,
+  autoAcceptable = quality === "strict"
 ): ParsedLogEvent {
+  return {
+    ...event,
+    quality,
+    autoAcceptable: quality === "strict" && autoAcceptable
+  }
+}
+
+function applyDeckSupport(event: ParsedLogEvent, deckProfile: DeckProfile): ParsedLogEvent {
   if (!event.cardName) {
     return event
   }
@@ -90,16 +110,17 @@ function applyDeckSupport(
   if (isCardInDeck(deckProfile, event.cardName)) {
     return {
       ...event,
-      supportStatus: "supported"
+      supportStatus: "supported",
+      autoAcceptable: event.quality === "strict" && event.autoAcceptable
     }
   }
 
   return {
     ...event,
     supportStatus: "unsupported",
-    note: event.note
-      ? `${event.note}；当前牌库不包含此牌`
-      : "当前牌库不包含此牌"
+    quality: "unsupported",
+    autoAcceptable: false,
+    note: event.note ? `${event.note}；当前牌库不包含此牌` : "当前牌库不包含此牌"
   }
 }
 
@@ -130,7 +151,37 @@ function resolveCardDetail(
 }
 
 function shouldIgnore(normalizedText: string): boolean {
-  return IGNORE_PATTERNS.some((pattern) => normalizedText.includes(pattern))
+  if (isChooseGeneralLine(normalizedText)) {
+    return true
+  }
+  if (GAIN_KNOWN_PATTERN.test(normalizedText) && !DRAW_NUMBER_PATTERN.test(normalizedText)) {
+    return false
+  }
+  return DRAW_NUMBER_PATTERN.test(normalizedText) || IGNORE_PATTERNS.some((pattern) => normalizedText.includes(pattern))
+}
+
+function hasPlayerName(value: string | undefined): value is string {
+  return Boolean(value && value.length >= 1 && !/^[的牌张]+$/u.test(value))
+}
+
+function countMatches(text: string, values: string[]): number {
+  return values.reduce((sum, value) => sum + (text.includes(value) ? 1 : 0), 0)
+}
+
+function findAllKnownCardNames(text: string): string[] {
+  const normalized = normalizeText(text)
+  const matchedNames = [...KNOWN_CARD_NAMES]
+    .sort((left, right) => right.length - left.length)
+    .filter((cardName) => normalized.includes(cardName))
+
+  return matchedNames.filter(
+    (cardName, index) => !matchedNames.slice(0, index).some((longer) => longer.includes(cardName))
+  )
+}
+
+function isSuspiciousContent(content: string): boolean {
+  const normalized = normalizeText(content)
+  return countMatches(normalized, ACTION_KEYWORDS) > 0 || findAllKnownCardNames(normalized).length > 1 || /[·•]/u.test(normalized)
 }
 
 function parseIgnoredLine(
@@ -139,13 +190,35 @@ function parseIgnoredLine(
   source: ParsedLogEvent["source"],
   index: number
 ): ParsedLogEvent {
+  const normalizedText = normalizeText(rawText)
   return {
     ...createBaseEvent(rawText, confidence, source, index),
     action: "ignore",
     confidence,
     source,
     status: "ignored",
-    note: "不代表公开牌出现，已忽略。"
+    quality: "ignored",
+    autoAcceptable: false,
+    note: isChooseGeneralLine(normalizedText) ? "开局选择武将标记，不计入牌库" : "不代表公开牌出现，已忽略。"
+  }
+}
+
+function parseAmbiguousLine(
+  rawText: string,
+  confidence: number,
+  source: ParsedLogEvent["source"],
+  index: number,
+  note: string
+): ParsedLogEvent {
+  return {
+    ...createBaseEvent(rawText, confidence, source, index),
+    action: "unknown",
+    confidence,
+    source,
+    status: "pending",
+    quality: "ambiguous",
+    autoAcceptable: false,
+    note
   }
 }
 
@@ -166,25 +239,56 @@ function parseSingleLine(
   }
 
   const base = createBaseEvent(rawText, confidence, source, index)
+
+  const gainKnownMatch = normalizedText.match(GAIN_KNOWN_PATTERN)
+  if (gainKnownMatch?.groups) {
+    const detail = resolveCardDetail(gainKnownMatch.groups.content ?? "", deckProfile)
+    return applyDeckSupport(
+      withQuality(
+        {
+          ...base,
+          playerName: gainKnownMatch.groups.player,
+          action: "gainKnown",
+          cardName: detail.cardName,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: detail.cardName ? "公开日志显示从摸牌堆获得具名牌" : detail.note
+        },
+        detail.cardName && hasPlayerName(gainKnownMatch.groups.player) ? "strict" : "ambiguous"
+      ),
+      deckProfile
+    )
+  }
+
+  if (findAllKnownCardNames(normalizedText).length > 0 && !/(使用|打出|弃置|装备|判定结果是|判定牌为|从摸牌堆获得|将【)/u.test(normalizedText)) {
+    return parseAmbiguousLine(rawText, confidence, source, index, "识别到孤立牌名，但缺少可确认的公开动作上下文。")
+  }
+
   const convertMatch = normalizedText.match(CONVERT_PATTERN)
   if (convertMatch?.groups) {
-    const fromLabel = convertMatch.groups.from ?? ""
-    const detail = resolveCardDetail(fromLabel, deckProfile)
+    const detail = resolveCardDetail(convertMatch.groups.from ?? "", deckProfile)
     return applyDeckSupport(
-      {
-        ...base,
-        playerName: convertMatch.groups.player,
-        action: "convert",
-        cardName: detail.cardName,
-        suit: detail.suit,
-        rank: detail.rank,
-        confidence,
-        source,
-        status: "pending",
-        note: detail.cardName
-          ? `转化牌事件，按原始牌 ${detail.cardName} 处理。`
-          : `转化牌事件，${detail.note ?? "未识别原始牌名"}。`
-      },
+      withQuality(
+        {
+          ...base,
+          playerName: convertMatch.groups.player,
+          action: "convert",
+          cardName: detail.cardName,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: detail.cardName
+            ? `转化牌事件，按原始牌 ${detail.cardName} 处理。`
+            : `转化牌事件，${detail.note ?? "未识别原始牌名"}。`
+        },
+        "ambiguous",
+        false
+      ),
       deckProfile
     )
   }
@@ -195,22 +299,21 @@ function parseSingleLine(
     const detail = resolveCardDetail(content, deckProfile)
     const hasOnlySuit = SUIT_ONLY_PATTERN.test(normalizeText(content))
     return applyDeckSupport(
-      {
-        ...base,
-        playerName: judgeResultMatch.groups.player,
-        action: "judge",
-        cardName: detail.cardName,
-        suit: detail.suit,
-        rank: detail.rank,
-        confidence,
-        source,
-        status: "pending",
-        note: detail.cardName
-          ? "判定结果公开牌"
-          : hasOnlySuit
-            ? "未识别判定牌名"
-            : detail.note
-      },
+      withQuality(
+        {
+          ...base,
+          playerName: judgeResultMatch.groups.player,
+          action: "judge",
+          cardName: detail.cardName,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: detail.cardName ? "判定结果公开牌" : hasOnlySuit ? "未识别判定牌名" : detail.note
+        },
+        detail.cardName && hasPlayerName(judgeResultMatch.groups.player) ? "strict" : "ambiguous"
+      ),
       deckProfile
     )
   }
@@ -219,71 +322,105 @@ function parseSingleLine(
   if (bracketMatch?.groups) {
     const detail = resolveCardDetail(bracketMatch.groups.content ?? "", deckProfile)
     return applyDeckSupport(
-      {
-        ...base,
-        playerName: bracketMatch.groups.player,
-        action: actionFromVerb(bracketMatch.groups.verb ?? ""),
-        cardName: detail.cardName,
-        suit: detail.suit,
-        rank: detail.rank,
-        confidence,
-        source,
-        status: "pending",
-        note: detail.note
-      },
+      withQuality(
+        {
+          ...base,
+          playerName: bracketMatch.groups.player,
+          action: actionFromVerb(bracketMatch.groups.verb ?? ""),
+          cardName: detail.cardName,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: detail.note
+        },
+        detail.cardName && hasPlayerName(bracketMatch.groups.player) ? "strict" : "ambiguous"
+      ),
+      deckProfile
+    )
+  }
+
+  const letEquipMatch = normalizedText.match(LET_EQUIP_PATTERN)
+  if (letEquipMatch?.groups) {
+    const detail = resolveCardDetail(letEquipMatch.groups.content ?? "", deckProfile)
+    return applyDeckSupport(
+      withQuality(
+        {
+          ...base,
+          playerName: letEquipMatch.groups.player,
+          targetName: letEquipMatch.groups.target,
+          action: "equip",
+          cardName: detail.cardName,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: detail.note
+        },
+        detail.cardName && hasPlayerName(letEquipMatch.groups.player) && hasPlayerName(letEquipMatch.groups.target) ? "strict" : "ambiguous"
+      ),
       deckProfile
     )
   }
 
   const targetUseMatch = normalizedText.match(TARGET_USE_PATTERN)
   if (targetUseMatch?.groups) {
-    const detail = resolveCardDetail(targetUseMatch.groups.content ?? "", deckProfile)
+    const content = targetUseMatch.groups.content ?? ""
+    const detail = resolveCardDetail(content, deckProfile)
+    const isStrict =
+      Boolean(detail.cardName) &&
+      hasPlayerName(targetUseMatch.groups.player) &&
+      hasPlayerName(targetUseMatch.groups.target) &&
+      !isSuspiciousContent(content)
     return applyDeckSupport(
-      {
-        ...base,
-        playerName: targetUseMatch.groups.player,
-        targetName: targetUseMatch.groups.target,
-        action: "use",
-        cardName: detail.cardName,
-        suit: detail.suit,
-        rank: detail.rank,
-        confidence,
-        source,
-        status: "pending",
-        note: detail.note
-      },
+      withQuality(
+        {
+          ...base,
+          playerName: targetUseMatch.groups.player,
+          targetName: targetUseMatch.groups.target,
+          action: "use",
+          cardName: detail.cardName,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: detail.note
+        },
+        isStrict ? "strict" : "ambiguous"
+      ),
       deckProfile
     )
   }
 
   const directMatch = normalizedText.match(DIRECT_ACTION_PATTERN)
   if (directMatch?.groups) {
-    const detail = resolveCardDetail(directMatch.groups.content ?? "", deckProfile)
+    const content = directMatch.groups.content ?? ""
+    const detail = resolveCardDetail(content, deckProfile)
+    const isStrict = Boolean(detail.cardName) && hasPlayerName(directMatch.groups.player) && !isSuspiciousContent(content)
     return applyDeckSupport(
-      {
-        ...base,
-        playerName: directMatch.groups.player,
-        action: actionFromVerb(directMatch.groups.verb ?? ""),
-        cardName: detail.cardName,
-        suit: detail.suit,
-        rank: detail.rank,
-        confidence,
-        source,
-        status: "pending",
-        note: detail.note
-      },
+      withQuality(
+        {
+          ...base,
+          playerName: directMatch.groups.player,
+          action: actionFromVerb(directMatch.groups.verb ?? ""),
+          cardName: detail.cardName,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: detail.note
+        },
+        isStrict ? "strict" : "ambiguous"
+      ),
       deckProfile
     )
   }
 
-  return {
-    ...base,
-    action: "unknown",
-    confidence,
-    source,
-    status: "pending",
-    note: "未匹配到支持的公开日志格式。"
-  }
+  return parseAmbiguousLine(rawText, confidence, source, index, "未匹配到支持的公开日志格式。")
 }
 
 function getLineY(line: OcrLine, fallback: number): number {
@@ -294,7 +431,7 @@ function getLineY(line: OcrLine, fallback: number): number {
 
   if (Array.isArray(box)) {
     const ys = box
-      .flatMap((point) => Array.isArray(point) ? [Number(point[1])] : [])
+      .flatMap((point) => (Array.isArray(point) ? [Number(point[1])] : []))
       .filter((value) => Number.isFinite(value))
     if (ys.length > 0) {
       return Math.min(...ys)
@@ -318,6 +455,7 @@ function canParseCandidate(text: string, deckProfile: DeckProfile): boolean {
     event &&
       event.action !== "unknown" &&
       event.action !== "ignore" &&
+      event.quality === "strict" &&
       event.cardName &&
       isKnownCardName(event.cardName)
   )

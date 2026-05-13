@@ -3,12 +3,16 @@ defineProps<{
   originalSrc: string
   croppedSrc: string
   processedSrc: string
+  deckCountCroppedSrc: string
+  deckCountProcessedSrc: string
 }>()
 
 const previewCards = [
   { key: "originalSrc", title: "原始画面" },
   { key: "croppedSrc", title: "裁剪后日志区域" },
-  { key: "processedSrc", title: "预处理后画面" }
+  { key: "processedSrc", title: "预处理后日志区域" },
+  { key: "deckCountCroppedSrc", title: "裁剪后剩余牌数区域" },
+  { key: "deckCountProcessedSrc", title: "预处理后剩余牌数区域" }
 ] as const
 </script>
 
@@ -16,7 +20,7 @@ const previewCards = [
   <section class="glass-panel rounded-3xl p-5">
     <div class="flex items-center justify-between gap-3">
       <h2 class="section-title">裁剪与预处理预览</h2>
-      <span class="text-xs muted">灰度 + 对比度增强 + 简单二值化</span>
+      <span class="text-xs muted">日志区与剩余牌数区独立预处理</span>
     </div>
 
     <div class="mt-4 grid gap-4">

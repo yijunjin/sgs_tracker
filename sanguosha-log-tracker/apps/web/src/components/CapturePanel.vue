@@ -5,6 +5,7 @@ import type { CropRect } from "../composables/useScreenCapture"
 const props = defineProps<{
   stream: MediaStream | null
   cropRect: CropRect
+  deckCountCropRect: CropRect
   preprocessEnabled: boolean
   captureError: string
   sourceLabel: string
@@ -18,17 +19,28 @@ const emit = defineEmits<{
   (event: "upload-file", file: File): void
   (event: "generate-sample"): void
   (event: "update-crop", cropRect: CropRect): void
+  (event: "update-deck-count-crop", cropRect: CropRect): void
+  (event: "reset-deck-count-crop"): void
   (event: "apply-crop"): void
   (event: "update:preprocessEnabled", value: boolean): void
 }>()
 
 const videoElement = ref<HTMLVideoElement | null>(null)
 const localCropRect = ref<CropRect>({ ...props.cropRect })
+const localDeckCountCropRect = ref<CropRect>({ ...props.deckCountCropRect })
 
 watch(
   () => props.cropRect,
   (value) => {
     localCropRect.value = { ...value }
+  },
+  { deep: true }
+)
+
+watch(
+  () => props.deckCountCropRect,
+  (value) => {
+    localDeckCountCropRect.value = { ...value }
   },
   { deep: true }
 )
@@ -52,6 +64,10 @@ const captureLabel = computed(() => (props.stream ? "重新选择窗口/标签�
 
 function emitCropUpdate(): void {
   emit("update-crop", localCropRect.value)
+}
+
+function emitDeckCountRoiUpdate(): void {
+  emit("update-deck-count-crop", localDeckCountCropRect.value)
 }
 
 function handleFileChange(event: Event): void {
@@ -140,6 +156,37 @@ defineExpose({
         />
         启用图像预处理
       </label>
+    </div>
+
+    <div class="mt-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <h3 class="text-sm font-semibold text-slate-200">剩余牌数 OCR 区域</h3>
+          <p class="mt-1 text-xs text-slate-400">独立于日志区域，使用整张游戏画面的像素坐标裁剪。</p>
+        </div>
+        <button class="action-button secondary-button" type="button" @click="emit('reset-deck-count-crop')">
+          恢复默认
+        </button>
+      </div>
+
+      <div class="mt-3 grid gap-3 sm:grid-cols-2">
+        <label class="text-sm">
+          <span class="mb-2 block text-slate-300">X</span>
+          <input v-model.number="localDeckCountCropRect.x" class="input-shell w-full" min="0" type="number" @input="emitDeckCountRoiUpdate" />
+        </label>
+        <label class="text-sm">
+          <span class="mb-2 block text-slate-300">Y</span>
+          <input v-model.number="localDeckCountCropRect.y" class="input-shell w-full" min="0" type="number" @input="emitDeckCountRoiUpdate" />
+        </label>
+        <label class="text-sm">
+          <span class="mb-2 block text-slate-300">宽度</span>
+          <input v-model.number="localDeckCountCropRect.width" class="input-shell w-full" min="1" type="number" @input="emitDeckCountRoiUpdate" />
+        </label>
+        <label class="text-sm">
+          <span class="mb-2 block text-slate-300">高度</span>
+          <input v-model.number="localDeckCountCropRect.height" class="input-shell w-full" min="1" type="number" @input="emitDeckCountRoiUpdate" />
+        </label>
+      </div>
     </div>
 
     <p v-if="captureError" class="mt-3 rounded-2xl border border-red-400/20 bg-red-950/30 px-4 py-3 text-sm text-red-200">

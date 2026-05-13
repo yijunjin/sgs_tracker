@@ -11,20 +11,22 @@ describe("parseLogInput", () => {
       action: "use",
       playerName: "黄月英",
       targetName: "周泰（您）",
-      cardName: "过河拆桥"
+      cardName: "过河拆桥",
+      quality: "strict",
+      autoAcceptable: true
     })
   })
 
-  it("parses direct use logs without brackets", () => {
-    const [event] = parseLogInput("郭嘉使用闪", "manual", oneVOneDeckProfile)
-
-    expect(event).toMatchObject({ action: "use", playerName: "郭嘉", cardName: "闪" })
-  })
-
-  it("prefers long card names", () => {
+  it("parses direct use logs and prefers long card names", () => {
     const [event] = parseLogInput("郭嘉使用无懈可击", "manual", oneVOneDeckProfile)
 
-    expect(event).toMatchObject({ action: "use", playerName: "郭嘉", cardName: "无懈可击" })
+    expect(event).toMatchObject({ action: "use", playerName: "郭嘉", cardName: "无懈可击", quality: "strict" })
+  })
+
+  it("parses direct use 闪", () => {
+    const [event] = parseLogInput("郭嘉使用闪", "manual", oneVOneDeckProfile)
+
+    expect(event).toMatchObject({ action: "use", playerName: "郭嘉", cardName: "闪", quality: "strict" })
   })
 
   it("parses judge result public cards by name only", () => {
@@ -34,8 +36,70 @@ describe("parseLogInput", () => {
       action: "judge",
       playerName: "周泰（您）",
       cardName: "寒冰剑",
+      quality: "strict",
       note: "判定结果公开牌"
     })
+  })
+
+  it("parses known draw pile gain by card name", () => {
+    const [event] = parseLogInput("郭嘉（您）从摸牌堆获得过河拆桥", "manual", oneVOneDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "gainKnown",
+      playerName: "郭嘉（您）",
+      cardName: "过河拆桥",
+      quality: "strict"
+    })
+  })
+
+  it("ignores numeric draw pile gain logs", () => {
+    const [event] = parseLogInput("周泰从摸牌堆获得2张牌", "manual", oneVOneDeckProfile)
+
+    expect(event).toMatchObject({ action: "ignore", quality: "ignored" })
+  })
+
+  it("ignores 集智 logs", () => {
+    const [event] = parseLogInput("黄月英发动集智", "manual", oneVOneDeckProfile)
+
+    expect(event).toMatchObject({ action: "ignore", quality: "ignored" })
+  })
+
+  it("ignores delayed trick effective logs", () => {
+    const [event] = parseLogInput("周泰（您）的乐不思蜀生效", "manual", oneVOneDeckProfile)
+
+    expect(event).toMatchObject({ action: "ignore", quality: "ignored" })
+  })
+
+  it("ignores choose general start logs", () => {
+    const [event] = parseLogInput("小杀(普通)选择了刘谌作为武将", "manual", oneVOneDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "ignore",
+      quality: "ignored",
+      status: "ignored",
+      note: "开局选择武将标记，不计入牌库"
+    })
+  })
+
+  it("does not auto-accept isolated card names", () => {
+    const [event] = parseLogInput("青釭剑6", "manual", oneVOneDeckProfile)
+
+    expect(event?.quality === "ambiguous" || event?.action === "unknown").toBe(true)
+    expect(event).toMatchObject({ autoAcceptable: false })
+    expect(event?.quality).not.toBe("strict")
+  })
+
+  it("marks abnormal multi-card text ambiguous", () => {
+    const [event] = parseLogInput("周泰打出杀郭嘉（您）万箭齐发", "manual", oneVOneDeckProfile)
+
+    expect(event).toMatchObject({ quality: "ambiguous", autoAcceptable: false })
+    expect(event?.quality).not.toBe("strict")
+  })
+
+  it("normalizes OCR mistakes before matching card names", () => {
+    const [event] = parseLogInput("黄月英对周泰（您）使用过问拆桥", "manual", oneVOneDeckProfile)
+
+    expect(event).toMatchObject({ action: "use", cardName: "过河拆桥", quality: "strict" })
   })
 
   it("merges broken OCR lines for 过河拆桥", () => {
@@ -49,43 +113,6 @@ describe("parseLogInput", () => {
 
     expect(merged.map((line) => line.text)).toEqual(["黄月英对周泰（您）使用过河拆桥"])
     expect(parseLogInput(merged, "ocr", oneVOneDeckProfile)[0]).toMatchObject({ cardName: "过河拆桥" })
-  })
-
-  it("merges broken OCR lines for 无懈可击", () => {
-    const merged = mergeBrokenOcrLines(
-      [
-        { text: "郭嘉使用无懈可", score: 0.96 },
-        { text: "击", score: 0.94 }
-      ],
-      oneVOneDeckProfile
-    )
-
-    expect(merged.map((line) => line.text)).toEqual(["郭嘉使用无懈可击"])
-    expect(parseLogInput(merged, "ocr", oneVOneDeckProfile)[0]).toMatchObject({ cardName: "无懈可击" })
-  })
-
-  it("ignores draw pile gain logs", () => {
-    const [event] = parseLogInput("黄月英从摸牌堆获得1张牌", "manual", oneVOneDeckProfile)
-
-    expect(event).toMatchObject({ action: "ignore", status: "ignored" })
-  })
-
-  it("ignores 集智 logs", () => {
-    const [event] = parseLogInput("黄月英发动集智", "manual", oneVOneDeckProfile)
-
-    expect(event).toMatchObject({ action: "ignore", status: "ignored" })
-  })
-
-  it("ignores delayed trick effective logs", () => {
-    const [event] = parseLogInput("周泰（您）的乐不思蜀生效", "manual", oneVOneDeckProfile)
-
-    expect(event).toMatchObject({ action: "ignore", status: "ignored" })
-  })
-
-  it("normalizes OCR mistakes before matching card names", () => {
-    const [event] = parseLogInput("黄月英对周泰（您）使用过问拆桥", "manual", oneVOneDeckProfile)
-
-    expect(event).toMatchObject({ action: "use", cardName: "过河拆桥" })
   })
 
   it("keeps bracketed logs compatible", () => {

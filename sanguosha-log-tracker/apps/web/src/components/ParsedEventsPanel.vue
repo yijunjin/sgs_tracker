@@ -17,6 +17,7 @@ const actionLabelMap: Record<ParsedLogEvent["action"], string> = {
   discard: "弃置",
   equip: "装备",
   judge: "判定",
+  gainKnown: "获得具名牌",
   convert: "转化使用",
   "convert-use": "转化使用",
   ignore: "忽略",
@@ -63,7 +64,7 @@ function canAccept(event: ParsedLogEvent): boolean {
         <p class="mt-1 text-sm muted">解析结果先进入 pending，确认后才会更新牌库。</p>
       </div>
       <button class="action-button" type="button" @click="emit('accept-high-confidence')">
-        全部接受高置信度事件
+        全部接受严格有效事件
       </button>
     </div>
 
@@ -72,7 +73,7 @@ function canAccept(event: ParsedLogEvent): boolean {
         v-for="event in events"
         :key="event.id"
         class="rounded-2xl border border-slate-800 bg-slate-950/60 p-4"
-        :class="event.action === 'ignore' ? 'opacity-60' : event.supportStatus === 'unsupported' ? 'border-amber-300/30' : ''"
+        :class="event.quality === 'ignored' ? 'opacity-50' : event.quality === 'ambiguous' ? 'border-amber-300/40' : event.supportStatus === 'unsupported' ? 'border-rose-300/30' : ''"
       >
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -83,9 +84,17 @@ function canAccept(event: ParsedLogEvent): boolean {
             </div>
             <p class="mt-2 text-sm text-slate-300">{{ event.rawText }}</p>
             <p class="mt-1 text-xs text-slate-400">
-              来源：{{ event.source }} | 置信度：{{ event.confidence.toFixed(2) }}
+              规范：{{ event.normalizedText }} | 来源：{{ event.source }} | OCR score：{{ event.confidence.toFixed(2) }}
               <span v-if="event.suit || event.rank"> | 细节：{{ event.suit || "?" }}{{ event.rank || "" }}</span>
             </p>
+            <p class="mt-1 text-xs text-slate-400">
+              action：{{ event.action }} | player：{{ event.playerName || "-" }} | target：{{ event.targetName || "-" }}
+              | quality：{{ event.quality }} | auto：{{ event.autoAcceptable ? "yes" : "no" }}
+              | impact：{{ event.impactCount ?? "-" }} | cycle：{{ event.cycleId ?? "-" }}
+            </p>
+            <p v-if="event.quality === 'ambiguous'" class="mt-2 text-xs text-amber-200">需要人工确认，不能批量自动接受。</p>
+            <p v-if="event.supportStatus === 'unsupported'" class="mt-2 text-xs text-rose-200">当前牌库不包含此牌，不会更新统计。</p>
+            <p v-if="event.duplicate" class="mt-2 text-xs text-slate-300">本轮可见日志重复，未入库。</p>
             <p v-if="event.note" class="mt-2 text-xs text-amber-100">{{ event.note }}</p>
           </div>
           <span class="rounded-full border px-3 py-1 text-xs" :class="statusClasses[event.status]">
