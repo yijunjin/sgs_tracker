@@ -1,0 +1,29 @@
+{
+  "name": "sanguosha-log-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.8.0",
+  "scripts": {
+    "dev": "pnpm --filter @slt/shared build && concurrently \"pnpm dev:api\" \"pnpm dev:web\"",
+    "dev:web": "pnpm --filter @slt/web dev",
+    "dev:api": "pnpm --filter @slt/api dev",
+    "build": "pnpm --filter @slt/shared build && pnpm -r --filter=!@slt/shared build",
+    "typecheck": "pnpm --filter @slt/shared build && pnpm -r typecheck",
+    "test": "pnpm --filter @slt/shared test"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.7",
+    "@types/node": "^22.10.2",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "@vitest/coverage-v8": "^2.1.8",
+    "@vue/tsconfig": "^0.7.0",
+    "concurrently": "^9.1.2",
+    "tailwindcss": "^4.1.7",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vite": "^5.4.14",
+    "vitest": "^2.1.8",
+    "vue-tsc": "^2.2.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@slt/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync:ort-assets": "node scripts/sync-ort-assets.mjs",
+    "predev": "pnpm sync:ort-assets",
+    "dev": "vite",
+    "prebuild": "pnpm sync:ort-assets",
+    "build": "vite build",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@paddleocr/paddleocr-js": "0.3.2",
+    "@slt/shared": "workspace:*",
+    "vue": "^3.5.13"
+  }
+}
