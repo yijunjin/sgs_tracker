@@ -166,8 +166,8 @@ export class PaddleOcrEngine implements OcrEngine {
     }
 
     const attempts: Array<{ worker: boolean; label: string }> = [
-      { worker: false, label: "worker=false" },
-      { worker: true, label: "worker=true" }
+      { worker: true, label: "worker=true" },
+      { worker: false, label: "worker=false" }
     ]
 
     this.initErrorMessages = []

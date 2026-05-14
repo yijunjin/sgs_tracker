@@ -95,9 +95,10 @@ export const apiClient = {
   getDemoDeckProfile() {
     return request<DeckProfile>("/deck-profiles/demo")
   },
-  createSession() {
+  createSession(options?: { endActive?: boolean }) {
     return request<{ sessionId: string; state: TrackerState }>("/sessions", {
-      method: "POST"
+      method: "POST",
+      body: JSON.stringify(options ?? {})
     })
   },
   getSession(sessionId: string) {
@@ -163,7 +164,7 @@ export const apiClient = {
     })
   },
   analyzeAliases(sessionId: string) {
-    return request<{ candidateCount: number }>(`/sessions/${sessionId}/analyze-aliases`, {
+    return request<{ candidateCount: number; candidates: OcrAliasCandidate[] }>(`/sessions/${sessionId}/analyze-aliases`, {
       method: "POST"
     })
   },

@@ -4,6 +4,7 @@ import {
   createInitialTrackerState,
   demoDeckProfile,
   undoLastEvent,
+  type OcrAliasCandidate,
   type OcrLine,
   type OcrLogRecord,
   type ParsedLogEvent,
@@ -12,7 +13,7 @@ import {
   type TrackerState,
   type UserCorrectionRecord
 } from "@slt/shared"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises"
 import { basename, dirname, resolve } from "node:path"
 
 import { AliasService } from "./alias.service.js"
@@ -33,6 +34,36 @@ export interface SessionRecord {
   userCorrections: UserCorrectionRecord[]
   lastError?: string | undefined
 }
+
+interface CreateSessionOptions {
+  endActive?: boolean
+}
+
+interface CleanupEmptySessionsResult {
+  removedSessionIds: string[]
+  removedReportFiles: string[]
+}
+
+export interface SessionListItem {
+  sessionId: string
+  status: SessionStatus
+  exportStatus: SessionExportStatus
+  startedAt: number
+  endedAt?: number | undefined
+  deckProfileId: string
+  summary: {
+    rawLineCount: number
+    mergedLineCount: number
+    parsedEventCount: number
+    ambiguousCount: number
+    unknownCount: number
+    correctionCount: number
+  }
+  lastError?: string | undefined
+}
+
+const MIN_REAL_GAME_RAW_LINES = 50
+const MIN_REAL_GAME_PARSED_EVENTS = 20
 
 function dataRoot(): string {
   const cwd = process.cwd()
@@ -62,9 +93,13 @@ export class SessionService {
 
   constructor(@Inject(AliasService) private readonly aliasService: AliasService) {}
 
-  createSession(): SessionRecord {
+  createSession(options: CreateSessionOptions = {}): SessionRecord {
     const activeSession = [...this.sessions.values()].find((session) => session.status === "active")
     if (activeSession) {
+      if (!options.endActive) {
+        return activeSession
+      }
+
       activeSession.status = "ended"
       activeSession.exportStatus = "pending"
       activeSession.endedAt = activeSession.endedAt ?? Date.now()
@@ -98,6 +133,19 @@ export class SessionService {
 
   listSessions(): SessionRecord[] {
     return [...this.sessions.values()].sort((left, right) => right.startedAt - left.startedAt)
+  }
+
+  async listSessionSummaries(): Promise<SessionListItem[]> {
+    const memorySessions = this.listSessions().map((session) => this.sessionToListItem(session))
+    const seenSessionIds = new Set(memorySessions.map((session) => session.sessionId))
+    const diskReports = await this.listDiskReports()
+    const diskSessions = diskReports
+      .filter((report) => !seenSessionIds.has(report.sessionId))
+      .map((report) => this.reportToListItem(report))
+
+    return [...memorySessions, ...diskSessions]
+      .filter((session) => session.status === "active" || this.isMeaningfulSessionListItem(session))
+      .sort((left, right) => right.startedAt - left.startedAt)
   }
 
   listEndedPendingSessions(): SessionRecord[] {
@@ -188,13 +236,61 @@ export class SessionService {
     return this.exportAndAnalyze(session)
   }
 
-  async analyzeAliases(id: string): Promise<{ candidateCount: number }> {
-    const session = this.getSession(id)
-    const report = await this.exportSessionJsonReport(session.id)
-    const candidates = await this.aliasService.analyzeReport(report, session.state.deckProfile)
-    session.status = "aliasAnalyzed"
-    session.exportStatus = "aliasAnalyzed"
-    return { candidateCount: candidates.length }
+  async analyzeAliases(id: string): Promise<{ candidateCount: number; candidates: OcrAliasCandidate[] }> {
+    const session = this.sessions.get(id)
+    const report = session ? await this.exportSessionJsonReport(session.id) : await this.readJsonReport(id)
+    const candidates = await this.aliasService.analyzeReport(report, session?.state.deckProfile ?? demoDeckProfile)
+    if (session) {
+      session.status = "aliasAnalyzed"
+      session.exportStatus = "aliasAnalyzed"
+    }
+    return { candidateCount: candidates.length, candidates }
+  }
+
+  async cleanupEmptySessions(): Promise<CleanupEmptySessionsResult> {
+    const removedSessionIds: string[] = []
+    const removedReportFiles: string[] = []
+
+    for (const session of this.sessions.values()) {
+      if (session.status === "active" || !this.isEmptySession(session)) {
+        continue
+      }
+
+      this.sessions.delete(session.id)
+      removedSessionIds.push(session.id)
+    }
+
+    await mkdir(this.reportsDir, { recursive: true })
+    const reportFiles = await readdir(this.reportsDir)
+    const emptyReportIds = new Set<string>()
+
+    for (const fileName of reportFiles) {
+      if (!fileName.endsWith(".analysis.json")) {
+        continue
+      }
+
+      try {
+        const report = JSON.parse(await readFile(resolve(this.reportsDir, fileName), "utf8")) as SessionReport
+        if (this.isEmptyReport(report)) {
+          emptyReportIds.add(report.sessionId)
+        }
+      } catch {
+        continue
+      }
+    }
+
+    for (const sessionId of emptyReportIds) {
+      for (const filePath of [this.jsonReportPath(sessionId), this.textReportPath(sessionId)]) {
+        try {
+          await unlink(filePath)
+          removedReportFiles.push(filePath)
+        } catch {
+          // Ignore already-missing paired report files.
+        }
+      }
+    }
+
+    return { removedSessionIds, removedReportFiles }
   }
 
   async exportAndAnalyze(session: SessionRecord): Promise<{ session: SessionRecord; report: SessionReport; candidateCount: number; error?: string }> {
@@ -333,6 +429,101 @@ export class SessionService {
         correctionCount: session.userCorrections.length
       }
     }
+  }
+
+  private isEmptySession(session: SessionRecord): boolean {
+    return (
+      session.rawOcrLines.length === 0 &&
+      session.mergedLines.length === 0 &&
+      session.state.events.length === 0 &&
+      session.userCorrections.length === 0
+    )
+  }
+
+  private isEmptyReport(report: SessionReport): boolean {
+    return (
+      report.summary.rawLineCount === 0 &&
+      report.summary.mergedLineCount === 0 &&
+      report.summary.parsedEventCount === 0 &&
+      report.summary.acceptedCount === 0 &&
+      report.summary.ignoredCount === 0 &&
+      report.summary.ambiguousCount === 0 &&
+      report.summary.unsupportedCount === 0 &&
+      report.summary.correctionCount === 0
+    )
+  }
+
+  private async listDiskReports(): Promise<SessionReport[]> {
+    try {
+      await mkdir(this.reportsDir, { recursive: true })
+      const fileNames = await readdir(this.reportsDir)
+      const reports: SessionReport[] = []
+
+      for (const fileName of fileNames) {
+        if (!fileName.endsWith(".analysis.json")) {
+          continue
+        }
+
+        try {
+          reports.push(JSON.parse(await readFile(resolve(this.reportsDir, fileName), "utf8")) as SessionReport)
+        } catch {
+          // Ignore malformed or partially-written report files.
+        }
+      }
+
+      return reports
+    } catch {
+      return []
+    }
+  }
+
+  private sessionToListItem(session: SessionRecord): SessionListItem {
+    return {
+      sessionId: session.id,
+      status: session.status,
+      exportStatus: session.exportStatus,
+      startedAt: session.startedAt,
+      endedAt: session.endedAt,
+      deckProfileId: session.state.deckProfileId,
+      summary: {
+        rawLineCount: session.rawOcrLines.length,
+        mergedLineCount: session.mergedLines.length,
+        parsedEventCount: session.state.events.length,
+        ambiguousCount: session.state.events.filter((event) => event.quality === "ambiguous").length,
+        unknownCount: session.state.events.filter((event) => event.action === "unknown").length,
+        correctionCount: session.userCorrections.length
+      },
+      lastError: session.lastError
+    }
+  }
+
+  private reportToListItem(report: SessionReport): SessionListItem {
+    return {
+      sessionId: report.sessionId,
+      status: "aliasAnalyzed",
+      exportStatus: "aliasAnalyzed",
+      startedAt: report.startedAt,
+      endedAt: report.endedAt,
+      deckProfileId: report.deckProfileId,
+      summary: {
+        rawLineCount: report.summary.rawLineCount,
+        mergedLineCount: report.summary.mergedLineCount,
+        parsedEventCount: report.summary.parsedEventCount,
+        ambiguousCount: report.summary.ambiguousCount,
+        unknownCount: report.parsedEvents.filter((event) => event.action === "unknown").length,
+        correctionCount: report.summary.correctionCount
+      }
+    }
+  }
+
+  private isMeaningfulSessionListItem(session: SessionListItem): boolean {
+    return (
+      session.summary.rawLineCount >= MIN_REAL_GAME_RAW_LINES ||
+      session.summary.parsedEventCount >= MIN_REAL_GAME_PARSED_EVENTS ||
+      session.summary.ambiguousCount > 0 ||
+      session.summary.unknownCount > 0 ||
+      session.summary.correctionCount > 0
+    )
   }
 
   private textReportPath(sessionId: string): string {

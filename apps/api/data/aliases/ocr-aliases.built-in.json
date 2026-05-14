@@ -1,0 +1,142 @@
+[
+  {
+    "id": "built-in-无解可击-无懈可击",
+    "alias": "无解可击",
+    "canonical": "无懈可击",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-无懈可系击-无懈可击",
+    "alias": "无懈可系击",
+    "canonical": "无懈可击",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-无懈可系-无懈可击",
+    "alias": "无懈可系",
+    "canonical": "无懈可击",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-过问拆桥-过河拆桥",
+    "alias": "过问拆桥",
+    "canonical": "过河拆桥",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-过可拆桥-过河拆桥",
+    "alias": "过可拆桥",
+    "canonical": "过河拆桥",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-过河拆挢-过河拆桥",
+    "alias": "过河拆挢",
+    "canonical": "过河拆桥",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-顺于牵羊-顺手牵羊",
+    "alias": "顺于牵羊",
+    "canonical": "顺手牵羊",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-顺手羊-顺手牵羊",
+    "alias": "顺手羊",
+    "canonical": "顺手牵羊",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-寒水剑-寒冰剑",
+    "alias": "寒水剑",
+    "canonical": "寒冰剑",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-塞冰剑-寒冰剑",
+    "alias": "塞冰剑",
+    "canonical": "寒冰剑",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-万箭齐友-万箭齐发",
+    "alias": "万箭齐友",
+    "canonical": "万箭齐发",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-南蛮人侵-南蛮入侵",
+    "alias": "南蛮人侵",
+    "canonical": "南蛮入侵",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-水淹七车-水淹七军",
+    "alias": "水淹七车",
+    "canonical": "水淹七军",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  },
+  {
+    "id": "built-in-挑-桃",
+    "alias": "挑",
+    "canonical": "桃",
+    "source": "builtIn",
+    "confidence": 1,
+    "enabled": true,
+    "hitCount": 0,
+    "createdAt": 0
+  }
+]

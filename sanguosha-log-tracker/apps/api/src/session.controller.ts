@@ -8,8 +8,8 @@ export class SessionController {
   constructor(@Inject(SessionService) private readonly sessionService: SessionService) {}
 
   @Post()
-  createSession() {
-    const session = this.sessionService.createSession()
+  createSession(@Body() body?: { endActive?: boolean }) {
+    const session = this.sessionService.createSession({ endActive: Boolean(body?.endActive) })
     return {
       sessionId: session.id,
       state: session.state
@@ -23,23 +23,7 @@ export class SessionController {
 
   @Get()
   listSessions() {
-    return this.sessionService.listSessions().map((session) => ({
-      sessionId: session.id,
-      status: session.status,
-      exportStatus: session.exportStatus,
-      startedAt: session.startedAt,
-      endedAt: session.endedAt,
-      deckProfileId: session.state.deckProfileId,
-      summary: {
-        rawLineCount: session.rawOcrLines.length,
-        mergedLineCount: session.mergedLines.length,
-        parsedEventCount: session.state.events.length,
-        ambiguousCount: session.state.events.filter((event) => event.quality === "ambiguous").length,
-        unknownCount: session.state.events.filter((event) => event.action === "unknown").length,
-        correctionCount: session.userCorrections.length
-      },
-      lastError: session.lastError
-    }))
+    return this.sessionService.listSessionSummaries()
   }
 
   @Post(":id/events")
@@ -82,6 +66,11 @@ export class SessionController {
   @Post(":id/end")
   endSession(@Param("id") id: string) {
     return this.sessionService.endSession(id)
+  }
+
+  @Post("cleanup-empty")
+  cleanupEmptySessions() {
+    return this.sessionService.cleanupEmptySessions()
   }
 
   @Get(":id/export/text")

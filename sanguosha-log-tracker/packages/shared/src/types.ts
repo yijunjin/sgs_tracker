@@ -36,6 +36,15 @@ export interface OcrLine {
   box?: unknown
 }
 
+export type OcrEvidenceImage = {
+  dataUrl: string
+  width: number
+  height: number
+  capturedAt: number
+  kind: "logRoi"
+  mimeType?: string | undefined
+}
+
 export type OcrLogRecord = {
   id: string
   text: string
@@ -91,6 +100,7 @@ export interface ParsedLogEvent {
     alias: string
     canonical: CardName
   }> | undefined
+  evidenceImage?: OcrEvidenceImage | undefined
   fingerprint: string
   createdAt: string
 }
@@ -186,11 +196,13 @@ export type OcrAliasCandidate = {
   confidence: number
   count: number
   sources: Array<"unknownEvent" | "ambiguousEvent" | "userCorrection" | "fuzzyMatch" | "overLimitEvent">
+  sessionIds: string[]
   examples: Array<{
     sessionId: string
     rawText: string
     normalizedText?: string | undefined
     eventId?: string | undefined
+    evidenceImage?: OcrEvidenceImage | undefined
   }>
   status: "pending" | "accepted" | "rejected"
   createdAt: number

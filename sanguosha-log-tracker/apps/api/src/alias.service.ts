@@ -24,6 +24,7 @@ function stableId(prefix: string, ...parts: string[]): string {
 @Injectable()
 export class AliasService {
   private readonly aliasesDir = resolve(dataRoot(), "aliases")
+  private readonly reportsDir = resolve(dataRoot(), "reports")
   private readonly builtInPath = resolve(this.aliasesDir, "ocr-aliases.built-in.json")
   private readonly userPath = resolve(this.aliasesDir, "ocr-aliases.user.json")
   private readonly candidatePath = resolve(this.aliasesDir, "ocr-alias-candidates.json")
@@ -55,8 +56,15 @@ export class AliasService {
 
   async getCandidates(status?: OcrAliasCandidate["status"]): Promise<OcrAliasCandidate[]> {
     await this.ensureStorage()
-    const candidates = await this.readJson<OcrAliasCandidate[]>(this.candidatePath, [])
-    return status ? candidates.filter((candidate) => candidate.status === status) : candidates
+    const candidates = (await this.readJson<OcrAliasCandidate[]>(this.candidatePath, [])).map((candidate) =>
+      this.normalizeCandidate(candidate)
+    )
+    const reconciled = await this.reconcileAcceptedCandidates(candidates)
+    const hydrated = await this.hydrateCandidateEvidence(reconciled)
+    if (hydrated.changed) {
+      await this.saveCandidates(hydrated.candidates)
+    }
+    return status ? hydrated.candidates.filter((candidate) => candidate.status === status) : hydrated.candidates
   }
 
   async saveCandidates(candidates: OcrAliasCandidate[]): Promise<void> {
@@ -65,7 +73,7 @@ export class AliasService {
 
   async analyzeReport(report: SessionReport, deckProfile: DeckProfile = defaultDeckProfile): Promise<OcrAliasCandidate[]> {
     const aliases = await this.getAliases()
-    const mined = analyzeOcrAliasesForReport(report, deckProfile, aliases)
+    const mined = analyzeOcrAliasesForReport(report, deckProfile, aliases).map((candidate) => this.normalizeCandidate(candidate))
     const existing = await this.getCandidates()
     const merged = this.mergeCandidates(existing, mined)
     await this.saveCandidates(merged)
@@ -101,6 +109,9 @@ export class AliasService {
 
     if (!existing) {
       userAliases.push(alias)
+    } else if (!existing.enabled) {
+      existing.enabled = true
+      existing.updatedAt = Date.now()
     }
 
     await this.saveUserAliases(userAliases)
@@ -160,6 +171,7 @@ export class AliasService {
   async deleteAlias(id: string): Promise<{ ok: true }> {
     const aliases = await this.getUserAliases()
     await this.saveUserAliases(aliases.filter((alias) => alias.id !== id))
+    await this.reconcileAcceptedCandidates(await this.getCandidates(), true)
     return { ok: true }
   }
 
@@ -176,14 +188,150 @@ export class AliasService {
       if (current.status === "rejected") {
         continue
       }
-      current.count += candidate.count
+      const currentExampleKeys = new Set(current.examples.map((example) => this.exampleKey(example)))
+      const hasNewExamples = candidate.examples.some((example) => !currentExampleKeys.has(this.exampleKey(example)))
+      const hasNewSessions = candidate.sessionIds.some((sessionId) => !current.sessionIds.includes(sessionId))
+      if (hasNewExamples || hasNewSessions) {
+        current.count += candidate.count
+      }
       current.confidence = Math.max(current.confidence, candidate.confidence)
       current.sources = [...new Set([...current.sources, ...candidate.sources])]
-      current.examples = [...current.examples, ...candidate.examples].slice(0, 5)
+      current.sessionIds = [...new Set([...current.sessionIds, ...candidate.sessionIds])]
+      current.examples = this.mergeExamples(current.examples, candidate.examples)
       current.updatedAt = Date.now()
     }
 
     return [...byKey.values()]
+  }
+
+  private exampleKey(example: OcrAliasCandidate["examples"][number]): string {
+    return `${example.sessionId}|${example.eventId ?? "-"}|${example.rawText}`
+  }
+
+  private mergeExamples(
+    ...groups: Array<OcrAliasCandidate["examples"]>
+  ): OcrAliasCandidate["examples"] {
+    const byKey = new Map<string, OcrAliasCandidate["examples"][number]>()
+
+    for (const example of groups.flat()) {
+      const key = this.exampleKey(example)
+      const current = byKey.get(key)
+      if (!current) {
+        byKey.set(key, example)
+        continue
+      }
+
+      if (!current.evidenceImage && example.evidenceImage) {
+        byKey.set(key, {
+          ...current,
+          evidenceImage: example.evidenceImage
+        })
+      }
+    }
+
+    return [...byKey.values()]
+      .sort((left, right) => Number(Boolean(right.evidenceImage)) - Number(Boolean(left.evidenceImage)))
+      .slice(0, 5)
+  }
+
+  private normalizeCandidate(candidate: OcrAliasCandidate): OcrAliasCandidate {
+    const sessionIds = candidate.sessionIds?.length
+      ? candidate.sessionIds
+      : [...new Set(candidate.examples.map((example) => example.sessionId).filter(Boolean))]
+
+    return {
+      ...candidate,
+      sessionIds
+    }
+  }
+
+  private async hydrateCandidateEvidence(
+    candidates: OcrAliasCandidate[]
+  ): Promise<{ candidates: OcrAliasCandidate[]; changed: boolean }> {
+    const reportCache = new Map<string, Promise<SessionReport | undefined>>()
+    let changed = false
+
+    const getReport = (sessionId: string): Promise<SessionReport | undefined> => {
+      const cached = reportCache.get(sessionId)
+      if (cached) {
+        return cached
+      }
+
+      const promise = this.readJson<SessionReport | undefined>(
+        resolve(this.reportsDir, `${sessionId}.analysis.json`),
+        undefined
+      )
+      reportCache.set(sessionId, promise)
+      return promise
+    }
+
+    const nextCandidates: OcrAliasCandidate[] = []
+    for (const candidate of candidates) {
+      const nextExamples: OcrAliasCandidate["examples"] = []
+
+      for (const example of candidate.examples) {
+        if (example.evidenceImage || !example.eventId) {
+          nextExamples.push(example)
+          continue
+        }
+
+        const report = await getReport(example.sessionId)
+        const sourceEvent = report?.parsedEvents.find((event) => event.id === example.eventId)
+        if (!sourceEvent?.evidenceImage) {
+          nextExamples.push(example)
+          continue
+        }
+
+        changed = true
+        nextExamples.push({
+          ...example,
+          evidenceImage: sourceEvent.evidenceImage
+        })
+      }
+
+      nextCandidates.push({
+        ...candidate,
+        examples: this.mergeExamples(nextExamples)
+      })
+    }
+
+    return { candidates: nextCandidates, changed }
+  }
+
+  private async reconcileAcceptedCandidates(
+    candidates: OcrAliasCandidate[],
+    forceSave = false
+  ): Promise<OcrAliasCandidate[]> {
+    const aliases = await this.getUserAliases()
+    const aliasKeys = new Set(aliases.map((alias) => this.candidateKey(alias.alias, alias.canonical)))
+    let changed = forceSave
+
+    const reconciled = candidates.map((candidate) => {
+      if (candidate.status !== "accepted") {
+        return candidate
+      }
+
+      if (aliasKeys.has(this.candidateKey(candidate.alias, candidate.suggestedCanonical))) {
+        return candidate
+      }
+
+      changed = true
+      return {
+        ...candidate,
+        status: "pending" as const,
+        updatedAt: Date.now()
+      }
+    })
+
+    if (changed) {
+      await this.saveCandidates(reconciled)
+    }
+
+    return reconciled
+  }
+
+  private candidateKey(alias: string, canonical: string): string {
+    return `${alias}|${canonical}`
   }
 
   private async writeJsonIfMissing<T>(filePath: string, value: T): Promise<void> {

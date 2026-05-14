@@ -143,6 +143,7 @@ function createCandidate(args: {
   rawText: string
   normalizedText?: string
   eventId?: string
+  evidenceImage?: ParsedLogEvent["evidenceImage"]
 }): OcrAliasCandidate {
   const now = Date.now()
   return {
@@ -152,12 +153,14 @@ function createCandidate(args: {
     confidence: args.confidence,
     count: 1,
     sources: [args.source],
+    sessionIds: [args.sessionId],
     examples: [
       {
         sessionId: args.sessionId,
         rawText: args.rawText,
         normalizedText: args.normalizedText,
-        eventId: args.eventId
+        eventId: args.eventId,
+        evidenceImage: args.evidenceImage
       }
     ],
     status: "pending",
@@ -179,6 +182,7 @@ function pushCandidate(
   existing.count += candidate.count
   existing.confidence = Math.max(existing.confidence, candidate.confidence)
   existing.sources = [...new Set([...existing.sources, ...candidate.sources])]
+  existing.sessionIds = [...new Set([...existing.sessionIds, ...candidate.sessionIds])]
   existing.examples = [...existing.examples, ...candidate.examples].slice(0, 5)
   existing.updatedAt = Date.now()
 }
@@ -193,6 +197,8 @@ function analyzeCorrection(
     return
   }
 
+  const sourceEvent = report.parsedEvents.find((event) => event.id === correction.eventId)
+
   for (const alias of extractAliasTermsFromRawText(correction.rawText, aliases)) {
     if (alias === correction.correctedCardName) {
       continue
@@ -206,7 +212,8 @@ function analyzeCorrection(
         confidence: 0.98,
         source: "userCorrection",
         rawText: correction.rawText,
-        eventId: correction.eventId
+        eventId: correction.eventId,
+        evidenceImage: sourceEvent?.evidenceImage
       })
     )
   }
@@ -262,7 +269,8 @@ export function analyzeOcrAliasesForReport(
           source: match.ambiguous ? "fuzzyMatch" : source,
           rawText: event.rawText,
           normalizedText: event.normalizedText,
-          eventId: event.id
+          eventId: event.id,
+          evidenceImage: event.evidenceImage
         })
       )
     }

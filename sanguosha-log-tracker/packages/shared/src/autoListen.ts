@@ -35,7 +35,7 @@ export const defaultAutoListenConfig: AutoListenConfig = {
   autoResetOnNewGame: true,
   autoAcceptStrictEvents: true,
   requireConfirmReshuffle: true,
-  captureIntervalMs: 300,
+  captureIntervalMs: 500,
   minOcrIntervalMs: 1200,
   stableDelayMs: 400,
   startSignalMinChooseLines: 1

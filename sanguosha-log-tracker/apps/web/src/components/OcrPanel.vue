@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue"
+import { computed, ref } from "vue"
 import { Activity, FileText, Play, RefreshCw, RotateCcw, Shield, Square, WandSparkles } from "lucide-vue-next"
 import UiTag from "./ui/UiTag.vue"
 
@@ -31,6 +31,7 @@ const props = defineProps<{
   lastStartSignal: string
   currentGameStartSignature: string
   hasEnteredInGame: boolean
+  pendingEventCount: number
   metrics: {
     rawLineCount: number
     mergedLineCount: number
@@ -61,7 +62,10 @@ const emit = defineEmits<{
   (event: "update:autoResetOnNewGame", value: boolean): void
   (event: "update:autoAcceptStrictEvents", value: boolean): void
   (event: "update:requireConfirmReshuffle", value: boolean): void
+  (event: "show-pending-events"): void
 }>()
+
+const activeRunPanel = ref<"logs" | "metrics">("logs")
 
 const statusLabelMap = {
   idle: "idle",
@@ -144,7 +148,7 @@ const recognizedRows = computed(() =>
       </div>
       <div class="metric-card">
         <p class="metric-label">运行状态</p>
-        <p class="metric-value">{{ autoStatus }}</p>
+        <p class="metric-value two-line-value">{{ autoStatus }}</p>
       </div>
       <div class="metric-card">
         <p class="metric-label">最近 OCR 时间</p>
@@ -164,13 +168,33 @@ const recognizedRows = computed(() =>
       </div>
     </div>
 
-    <div class="run-tabs mt-4">
-      <span class="active">最近日志</span>
-      <span>待确认事件（{{ metrics.ambiguousEventCount }}）</span>
-      <span>调试指标</span>
+    <div class="run-tabs mt-4" role="tablist" aria-label="OCR 运行面板">
+      <button
+        class="run-tab-button"
+        :class="{ active: activeRunPanel === 'logs' }"
+        type="button"
+        role="tab"
+        :aria-selected="activeRunPanel === 'logs'"
+        @click="activeRunPanel = 'logs'"
+      >
+        最近日志
+      </button>
+      <button class="run-tab-button" type="button" @click="emit('show-pending-events')">
+        待确认事件（{{ pendingEventCount }}）
+      </button>
+      <button
+        class="run-tab-button"
+        :class="{ active: activeRunPanel === 'metrics' }"
+        type="button"
+        role="tab"
+        :aria-selected="activeRunPanel === 'metrics'"
+        @click="activeRunPanel = 'metrics'"
+      >
+        调试指标
+      </button>
     </div>
 
-    <div class="mt-3 overflow-hidden rounded-lg border border-slate-800/70">
+    <div v-if="activeRunPanel === 'logs'" class="mt-3 overflow-hidden rounded-lg border border-slate-800/70">
       <table class="data-table compact-log-table">
         <thead>
           <tr>
@@ -194,7 +218,7 @@ const recognizedRows = computed(() =>
       </table>
     </div>
 
-    <div class="status-metrics">
+    <div v-else class="status-metrics">
       <div><span>已处理行</span><strong>{{ metrics.rawLineCount }}</strong></div>
       <div><span>合并行</span><strong>{{ metrics.mergedLineCount }}</strong></div>
       <div><span>丢弃行</span><strong>{{ metrics.duplicateSkippedCount }}</strong></div>

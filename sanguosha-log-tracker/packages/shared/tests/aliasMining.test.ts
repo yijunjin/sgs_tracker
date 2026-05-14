@@ -58,7 +58,8 @@ describe("OCR alias mining", () => {
           alias: "丈八虵矛",
           suggestedCanonical: "丈八蛇矛",
           confidence: 0.98,
-          sources: ["userCorrection"]
+          sources: ["userCorrection"],
+          sessionIds: ["session-test"]
         })
       ])
     )

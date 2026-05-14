@@ -189,7 +189,7 @@ export function useTrackerSession() {
   async function endAndCreateSession(): Promise<void> {
     if (runtimeMode.value === "remote" && sessionId.value) {
       await endCurrentSession()
-      const next = await apiClient.createSession()
+      const next = await apiClient.createSession({ endActive: true })
       sessionId.value = next.sessionId
       trackerState.value = next.state
       statusMessage.value = "上一局已结束并分析，已创建新会话。"

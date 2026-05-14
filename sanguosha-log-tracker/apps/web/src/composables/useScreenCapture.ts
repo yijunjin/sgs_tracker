@@ -8,6 +8,31 @@ export interface CropRect {
   height: number
 }
 
+export interface SourceSize {
+  width: number
+  height: number
+}
+
+interface StoredCropState {
+  rect: CropRect
+  sourceSize: SourceSize | null
+}
+
+interface LegacyStoredCropState extends Partial<StoredCropState>, Partial<CropRect> {
+  sourceWidth?: number
+  sourceHeight?: number
+}
+
+const LOG_CROP_STORAGE_KEY = "slt.logCropRect"
+const DECK_COUNT_CROP_STORAGE_KEY = "slt.deckCountCropRect"
+const DEFAULT_LOG_CROP_SOURCE_SIZE: SourceSize = { width: 1920, height: 1080 }
+const DEFAULT_LOG_CROP_RECT: CropRect = {
+  x: 1677,
+  y: 337,
+  width: 200,
+  height: 230
+}
+
 function createCanvas(width = 1, height = 1): HTMLCanvasElement {
   const canvas = document.createElement("canvas")
   canvas.width = width
@@ -17,6 +42,19 @@ function createCanvas(width = 1, height = 1): HTMLCanvasElement {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
+}
+
+function areSourceSizesEqual(left: SourceSize | null, right: SourceSize | null): boolean {
+  return left?.width === right?.width && left?.height === right?.height
+}
+
+function areCropRectsEqual(left: CropRect, right: CropRect): boolean {
+  return (
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height
+  )
 }
 
 function toPreviewUrl(canvas: HTMLCanvasElement | null): string {
@@ -131,6 +169,8 @@ function cropVideoFrame(videoElement: HTMLVideoElement, cropRect: CropRect): HTM
 }
 
 export function useScreenCapture() {
+  const storedCropState = loadCropState()
+  const storedDeckCountCropState = loadDeckCountCropState()
   const stream = shallowRef<MediaStream | null>(null)
   const sourceCanvas = shallowRef<HTMLCanvasElement | null>(null)
   const croppedCanvas = shallowRef<HTMLCanvasElement | null>(null)
@@ -145,13 +185,10 @@ export function useScreenCapture() {
   const captureError = ref("")
   const sourceLabel = ref("未选择来源")
   const preprocessEnabled = ref(true)
-  const deckCountCropRect = ref<CropRect>(loadDeckCountCropRect())
-  const cropRect = ref<CropRect>({
-    x: 1677,
-    y: 337,
-    width: 200,
-    height: 230
-  })
+  const deckCountCropRect = ref<CropRect>(storedDeckCountCropState.rect)
+  const cropRect = ref<CropRect>(storedCropState.rect)
+  const cropRectSourceSize = ref<SourceSize | null>(storedCropState.sourceSize)
+  const deckCountCropRectSourceSize = ref<SourceSize | null>(storedDeckCountCropState.sourceSize)
 
   function normalizeCropRect(value: Partial<CropRect>): CropRect {
     return {
@@ -162,31 +199,185 @@ export function useScreenCapture() {
     }
   }
 
-  function loadDeckCountCropRect(): CropRect {
+  function normalizeSourceSize(value: Partial<SourceSize> | null | undefined): SourceSize | null {
+    const width = Math.round(Number(value?.width) || 0)
+    const height = Math.round(Number(value?.height) || 0)
+    if (width <= 0 || height <= 0) {
+      return null
+    }
+
+    return { width, height }
+  }
+
+  function normalizeCropRectForSource(value: Partial<CropRect>, sourceSize?: SourceSize | null): CropRect {
+    const normalized = normalizeCropRect(value)
+    if (!sourceSize) {
+      return normalized
+    }
+
+    const safeX = clamp(normalized.x, 0, Math.max(0, sourceSize.width - 1))
+    const safeY = clamp(normalized.y, 0, Math.max(0, sourceSize.height - 1))
+    return {
+      x: safeX,
+      y: safeY,
+      width: clamp(normalized.width, 1, Math.max(1, sourceSize.width - safeX)),
+      height: clamp(normalized.height, 1, Math.max(1, sourceSize.height - safeY))
+    }
+  }
+
+  function loadCropState(): StoredCropState {
     try {
-      const stored = window.localStorage.getItem("slt.deckCountCropRect")
+      const stored = window.localStorage.getItem(LOG_CROP_STORAGE_KEY)
+      if (!stored) {
+        return {
+          rect: { ...DEFAULT_LOG_CROP_RECT },
+          sourceSize: { ...DEFAULT_LOG_CROP_SOURCE_SIZE }
+        }
+      }
+
+      const parsed = JSON.parse(stored) as LegacyStoredCropState
+      const parsedRect = "rect" in parsed ? parsed.rect : parsed
+      const parsedSourceSize =
+        "sourceSize" in parsed
+          ? normalizeSourceSize(parsed.sourceSize)
+          : normalizeSourceSize({
+              width: Number(parsed.sourceWidth),
+              height: Number(parsed.sourceHeight)
+            })
+
+      return {
+        rect: normalizeCropRect(parsedRect ?? DEFAULT_LOG_CROP_RECT),
+        sourceSize: parsedSourceSize ?? { ...DEFAULT_LOG_CROP_SOURCE_SIZE }
+      }
+    } catch {
+      return {
+        rect: { ...DEFAULT_LOG_CROP_RECT },
+        sourceSize: { ...DEFAULT_LOG_CROP_SOURCE_SIZE }
+      }
+    }
+  }
+
+  function loadDeckCountCropState(): StoredCropState {
+    try {
+      const stored = window.localStorage.getItem(DECK_COUNT_CROP_STORAGE_KEY)
       if (!stored) {
         const legacyStored = window.localStorage.getItem("slt.deckCountRoiPercent")
         if (legacyStored) {
           const legacy = JSON.parse(legacyStored) as CropRect
           if (legacy.width <= 1 && legacy.height <= 1) {
-            return normalizeCropRect({
-              x: legacy.x * 1920,
-              y: legacy.y * 1080,
-              width: legacy.width * 1920,
-              height: legacy.height * 1080
-            })
+            return {
+              rect: normalizeCropRect({
+                x: legacy.x * 1920,
+                y: legacy.y * 1080,
+                width: legacy.width * 1920,
+                height: legacy.height * 1080
+              }),
+              sourceSize: { ...DEFAULT_LOG_CROP_SOURCE_SIZE }
+            }
           }
-          return normalizeCropRect(legacy)
+          return {
+            rect: normalizeCropRect(legacy),
+            sourceSize: { ...DEFAULT_LOG_CROP_SOURCE_SIZE }
+          }
         }
 
-        return { ...defaultDeckCountCropRect }
+        return {
+          rect: { ...defaultDeckCountCropRect },
+          sourceSize: { ...DEFAULT_LOG_CROP_SOURCE_SIZE }
+        }
       }
-      const parsed = JSON.parse(stored) as CropRect
-      return normalizeCropRect(parsed)
+      const parsed = JSON.parse(stored) as LegacyStoredCropState
+      const parsedRect = "rect" in parsed ? parsed.rect : parsed
+      const parsedSourceSize =
+        "sourceSize" in parsed
+          ? normalizeSourceSize(parsed.sourceSize)
+          : normalizeSourceSize({
+              width: Number(parsed.sourceWidth),
+              height: Number(parsed.sourceHeight)
+            })
+
+      return {
+        rect: normalizeCropRect(parsedRect ?? defaultDeckCountCropRect),
+        sourceSize: parsedSourceSize ?? { ...DEFAULT_LOG_CROP_SOURCE_SIZE }
+      }
     } catch {
-      return { ...defaultDeckCountCropRect }
+      return {
+        rect: { ...defaultDeckCountCropRect },
+        sourceSize: { ...DEFAULT_LOG_CROP_SOURCE_SIZE }
+      }
     }
+  }
+
+  function persistCropState(): void {
+    window.localStorage.setItem(
+      LOG_CROP_STORAGE_KEY,
+      JSON.stringify({
+        rect: cropRect.value,
+        sourceSize: cropRectSourceSize.value
+      })
+    )
+  }
+
+  function applyCropSourceSize(sourceSize: SourceSize | null): void {
+    const normalizedSourceSize = normalizeSourceSize(sourceSize)
+    if (!normalizedSourceSize) {
+      return
+    }
+
+    if (
+      areSourceSizesEqual(cropRectSourceSize.value, normalizedSourceSize) &&
+      areSourceSizesEqual(deckCountCropRectSourceSize.value, normalizedSourceSize)
+    ) {
+      return
+    }
+
+    const nextDeckCountCropRect = scaleCropRectToSource(
+      deckCountCropRect.value,
+      deckCountCropRectSourceSize.value,
+      normalizedSourceSize
+    )
+    const nextCropRect = scaleCropRectToSource(cropRect.value, cropRectSourceSize.value, normalizedSourceSize)
+
+    if (!areCropRectsEqual(deckCountCropRect.value, nextDeckCountCropRect)) {
+      deckCountCropRect.value = nextDeckCountCropRect
+    }
+    if (!areCropRectsEqual(cropRect.value, nextCropRect)) {
+      cropRect.value = nextCropRect
+    }
+
+    deckCountCropRectSourceSize.value = normalizedSourceSize
+    cropRectSourceSize.value = normalizedSourceSize
+  }
+
+  function persistDeckCountCropState(): void {
+    window.localStorage.setItem(
+      DECK_COUNT_CROP_STORAGE_KEY,
+      JSON.stringify({
+        rect: deckCountCropRect.value,
+        sourceSize: deckCountCropRectSourceSize.value
+      })
+    )
+  }
+
+  function scaleCropRectToSource(rect: CropRect, previousSourceSize: SourceSize | null, nextSourceSize: SourceSize): CropRect {
+    if (
+      previousSourceSize &&
+      previousSourceSize.width > 0 &&
+      previousSourceSize.height > 0 &&
+      (previousSourceSize.width !== nextSourceSize.width || previousSourceSize.height !== nextSourceSize.height)
+    ) {
+      return normalizeCropRectForSource(
+        {
+          x: rect.x * (nextSourceSize.width / previousSourceSize.width),
+          y: rect.y * (nextSourceSize.height / previousSourceSize.height),
+          width: rect.width * (nextSourceSize.width / previousSourceSize.width),
+          height: rect.height * (nextSourceSize.height / previousSourceSize.height)
+        },
+        nextSourceSize
+      )
+    }
+
+    return normalizeCropRectForSource(rect, nextSourceSize)
   }
 
   function refreshDerivedCanvases(): void {
@@ -280,6 +471,7 @@ export function useScreenCapture() {
       return
     }
 
+    applyCropSourceSize({ width: videoElement.videoWidth, height: videoElement.videoHeight })
     const canvas = createCanvas(videoElement.videoWidth, videoElement.videoHeight)
     const context = canvas.getContext("2d")
     if (!context) {
@@ -314,6 +506,7 @@ export function useScreenCapture() {
       return null
     }
 
+    applyCropSourceSize({ width: videoElement.videoWidth, height: videoElement.videoHeight })
     const cropped = cropVideoFrame(videoElement, cropRect.value)
     if (!cropped) {
       captureError.value = "当前没有可截取的视频画面。"
@@ -323,10 +516,20 @@ export function useScreenCapture() {
     return preprocessEnabled.value ? preprocessCanvas(cropped) : cropped
   }
 
+  function captureCurrentDeckCountFrame(videoElement: HTMLVideoElement | null): HTMLCanvasElement | null {
+    if (!videoElement || videoElement.videoWidth === 0 || videoElement.videoHeight === 0) {
+      return null
+    }
+
+    applyCropSourceSize({ width: videoElement.videoWidth, height: videoElement.videoHeight })
+    return cropVideoFrame(videoElement, deckCountCropRect.value)
+  }
+
   async function loadImageFile(file: File): Promise<void> {
     captureError.value = ""
     try {
       const bitmap = await createImageBitmap(file)
+      applyCropSourceSize({ width: bitmap.width, height: bitmap.height })
       const canvas = createCanvas(bitmap.width, bitmap.height)
       const context = canvas.getContext("2d")
       if (!context) {
@@ -389,6 +592,8 @@ export function useScreenCapture() {
 
     sourceCanvas.value = canvas
     sourceLabel.value = "示例日志截图"
+    cropRectSourceSize.value = { width: canvas.width, height: canvas.height }
+    deckCountCropRectSourceSize.value = { width: canvas.width, height: canvas.height }
     cropRect.value = {
       x: 24,
       y: 86,
@@ -404,17 +609,20 @@ export function useScreenCapture() {
     refreshDerivedCanvases()
   }
 
-  function updateCropRect(nextCropRect: CropRect): void {
-    cropRect.value = {
-      x: Math.max(0, nextCropRect.x),
-      y: Math.max(0, nextCropRect.y),
-      width: Math.max(1, nextCropRect.width),
-      height: Math.max(1, nextCropRect.height)
+  function updateCropRect(nextCropRect: CropRect, sourceSize?: SourceSize): void {
+    const normalizedSourceSize = normalizeSourceSize(sourceSize)
+    if (normalizedSourceSize) {
+      cropRectSourceSize.value = normalizedSourceSize
     }
+    cropRect.value = normalizeCropRectForSource(nextCropRect, normalizedSourceSize ?? cropRectSourceSize.value)
   }
 
-  function updateDeckCountCropRect(nextCropRect: CropRect): void {
-    deckCountCropRect.value = normalizeCropRect(nextCropRect)
+  function updateDeckCountCropRect(nextCropRect: CropRect, sourceSize?: SourceSize): void {
+    const normalizedSourceSize = normalizeSourceSize(sourceSize)
+    if (normalizedSourceSize) {
+      deckCountCropRectSourceSize.value = normalizedSourceSize
+    }
+    deckCountCropRect.value = normalizeCropRectForSource(nextCropRect, normalizedSourceSize ?? deckCountCropRectSourceSize.value)
   }
 
   function resetDeckCountCropRect(): void {
@@ -427,9 +635,28 @@ export function useScreenCapture() {
   )
 
   watch(
-    () => deckCountCropRect.value,
-    (value) => {
-      window.localStorage.setItem("slt.deckCountCropRect", JSON.stringify(value))
+    () => [
+      cropRect.value.x,
+      cropRect.value.y,
+      cropRect.value.width,
+      cropRect.value.height,
+      cropRectSourceSize.value?.width ?? 0,
+      cropRectSourceSize.value?.height ?? 0
+    ],
+    () => persistCropState()
+  )
+
+  watch(
+    () => [
+      deckCountCropRect.value.x,
+      deckCountCropRect.value.y,
+      deckCountCropRect.value.width,
+      deckCountCropRect.value.height,
+      deckCountCropRectSourceSize.value?.width ?? 0,
+      deckCountCropRectSourceSize.value?.height ?? 0
+    ],
+    () => {
+      persistDeckCountCropState()
       refreshDeckCountPreview()
     },
     { deep: true }
@@ -456,11 +683,13 @@ export function useScreenCapture() {
     captureCurrentFrame,
     captureCurrentSourceFrame,
     captureCurrentRoiFrame,
+    captureCurrentDeckCountFrame,
     loadImageFile,
     generateSampleImage,
     updateCropRect,
     updateDeckCountCropRect,
     resetDeckCountCropRect,
+    applyCropSourceSize,
     refreshDeckCountPreview,
     refreshDerivedCanvases
   }
