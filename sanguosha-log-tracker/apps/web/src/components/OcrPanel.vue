@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import UiTag from "./ui/UiTag.vue"
+
 defineProps<{
   engineStatus: "idle" | "loading" | "ready" | "failed"
   engineError: string
@@ -68,18 +70,18 @@ const statusLabelMap = {
 </script>
 
 <template>
-  <section class="glass-panel rounded-3xl p-5">
+  <section class="glass-panel p-4">
     <div class="flex flex-wrap items-start justify-between gap-4">
       <div>
-        <h2 class="section-title">OCR 识别结果</h2>
-        <p class="mt-1 text-sm muted">自动监听先做日志区图片差异检测，稳定后才触发 OCR。</p>
+        <h2 class="section-title">OCR 运行台</h2>
+        <p class="mt-1 text-xs muted">自动监听先做日志区图片差异检测，稳定后才触发 OCR。</p>
       </div>
-      <span class="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-xs text-slate-300">
+      <UiTag :variant="engineStatus === 'ready' ? 'success' : engineStatus === 'failed' ? 'danger' : 'muted'" dot>
         引擎状态：{{ statusLabelMap[engineStatus] }}
-      </span>
+      </UiTag>
     </div>
 
-    <div class="mt-4 flex flex-wrap gap-3">
+    <div class="mt-4 grid gap-3 sm:grid-cols-3">
       <button class="action-button" type="button" :disabled="!hasCanvas || engineStatus === 'loading' || isOcrRunning" @click="emit('run-real')">
         运行真实 OCR
       </button>
@@ -114,28 +116,28 @@ const statusLabelMap = {
     </div>
 
     <div class="mt-4 grid gap-3 text-sm md:grid-cols-3">
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <p class="text-xs text-slate-500">当前模式</p>
-        <p class="mt-1 font-semibold text-slate-100">{{ autoModeLabel }}</p>
+      <div class="metric-card">
+        <p class="metric-label">当前模式</p>
+        <p class="metric-value gold-text">{{ autoModeLabel }}</p>
         <p v-if="autoModeNote" class="mt-2 text-xs text-amber-100">{{ autoModeNote }}</p>
       </div>
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <p class="text-xs text-slate-500">运行状态</p>
-        <p class="mt-1 font-semibold text-slate-100">{{ autoStatus }}</p>
+      <div class="metric-card">
+        <p class="metric-label">运行状态</p>
+        <p class="metric-value">{{ autoStatus }}</p>
       </div>
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <p class="text-xs text-slate-500">当前是否 OCR 中</p>
-        <p class="mt-1 font-semibold text-slate-100">{{ isOcrRunning ? "是" : "否" }}</p>
+      <div class="metric-card">
+        <p class="metric-label">当前是否 OCR 中</p>
+        <p class="metric-value">{{ isOcrRunning ? "是" : "否" }}</p>
       </div>
     </div>
 
     <div class="mt-4 grid gap-3 text-sm md:grid-cols-3">
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <p class="text-xs text-slate-500">最近一次 OCR 时间</p>
-        <p class="mt-1 font-semibold text-slate-100">{{ lastOcrAt || "暂无" }}</p>
+      <div class="metric-card">
+        <p class="metric-label">最近一次 OCR 时间</p>
+        <p class="metric-value">{{ lastOcrAt || "暂无" }}</p>
       </div>
-      <label class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <span class="text-xs text-slate-500">自动识别开局并开始监听</span>
+      <label class="metric-card">
+        <span class="metric-label">自动识别开局并开始监听</span>
         <span class="mt-2 flex items-center gap-2 text-slate-200">
           <input
             :checked="autoStartOnChooseGeneral"
@@ -146,8 +148,8 @@ const statusLabelMap = {
           开启
         </span>
       </label>
-      <label class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <span class="text-xs text-slate-500">检测到新局后自动重置</span>
+      <label class="metric-card">
+        <span class="metric-label">检测到新局后自动重置</span>
         <span class="mt-2 flex items-center gap-2 text-slate-200">
           <input
             :checked="autoResetOnNewGame"
@@ -161,16 +163,16 @@ const statusLabelMap = {
     </div>
 
     <div class="mt-4 grid gap-3 text-sm md:grid-cols-3">
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <p class="text-xs text-slate-500">官方剩余牌 OCR 原文</p>
-        <p class="mt-1 font-semibold text-slate-100">{{ deckRemainingRawText || "暂无" }}</p>
+      <div class="metric-card">
+        <p class="metric-label">官方剩余牌 OCR 原文</p>
+        <p class="metric-value">{{ deckRemainingRawText || "暂无" }}</p>
       </div>
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <p class="text-xs text-slate-500">稳定剩余牌数</p>
-        <p class="mt-1 font-semibold text-slate-100">{{ stableDeckRemaining ?? "暂无" }}</p>
+      <div class="metric-card">
+        <p class="metric-label">稳定剩余牌数</p>
+        <p class="metric-value gold-text">{{ stableDeckRemaining ?? "暂无" }}</p>
       </div>
-      <label class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <span class="text-xs text-slate-500">自动接受严格有效事件</span>
+      <label class="metric-card">
+        <span class="metric-label">自动接受严格有效事件</span>
         <span class="mt-2 flex items-center gap-2 text-slate-200">
           <input
             :checked="autoAcceptStrictEvents"
@@ -184,8 +186,8 @@ const statusLabelMap = {
     </div>
 
     <div class="mt-4 grid gap-3 text-sm md:grid-cols-3">
-      <label class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <span class="text-xs text-slate-500">洗牌提示需要人工确认</span>
+      <label class="metric-card">
+        <span class="metric-label">洗牌提示需要人工确认</span>
         <span class="mt-2 flex items-center gap-2 text-slate-200">
           <input
             :checked="requireConfirmReshuffle"
@@ -196,8 +198,8 @@ const statusLabelMap = {
           开启
         </span>
       </label>
-      <label class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <span class="text-xs text-slate-500">去重模式</span>
+      <label class="metric-card">
+        <span class="metric-label">去重模式</span>
         <span class="mt-2 flex items-center gap-2 text-slate-200">
           <input
             :checked="onlyNewVisibleLines"
@@ -208,9 +210,9 @@ const statusLabelMap = {
           仅处理新增日志行
         </span>
       </label>
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <p class="text-xs text-slate-500">日志处理顺序</p>
-        <p class="mt-1 font-semibold text-slate-100">{{ logProcessingOrder }}</p>
+      <div class="metric-card">
+        <p class="metric-label">日志处理顺序</p>
+        <p class="metric-value">{{ logProcessingOrder }}</p>
         <div class="mt-3 flex flex-wrap gap-2">
           <button class="action-button secondary-button" type="button" @click="emit('update:logProcessingOrder', 'oldest-first')">
             oldest -> newest
@@ -220,21 +222,21 @@ const statusLabelMap = {
           </button>
         </div>
       </div>
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-        <p class="text-xs text-slate-500">本轮 OCR 耗时</p>
-        <p class="mt-1 font-semibold text-slate-100">{{ metrics.lastOcrDurationMs }}ms</p>
+      <div class="metric-card">
+        <p class="metric-label">本轮 OCR 耗时</p>
+        <p class="metric-value">{{ metrics.lastOcrDurationMs }}ms</p>
       </div>
     </div>
 
     <div class="mt-4 grid gap-3 text-sm md:grid-cols-4">
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-3 py-2">原始行 {{ metrics.rawLineCount }}</div>
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-3 py-2">合并后 {{ metrics.mergedLineCount }}</div>
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-3 py-2">新增 {{ metrics.newLineCount }}</div>
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-3 py-2">忽略 {{ metrics.ignoredLineCount }}</div>
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-3 py-2">strict {{ metrics.strictEventCount }}</div>
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-3 py-2">ambiguous {{ metrics.ambiguousEventCount }}</div>
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-3 py-2">unsupported {{ metrics.unsupportedEventCount }}</div>
-      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-3 py-2">重复跳过 {{ metrics.duplicateSkippedCount }}</div>
+      <UiTag>原始行 {{ metrics.rawLineCount }}</UiTag>
+      <UiTag>合并后 {{ metrics.mergedLineCount }}</UiTag>
+      <UiTag>新增 {{ metrics.newLineCount }}</UiTag>
+      <UiTag>忽略 {{ metrics.ignoredLineCount }}</UiTag>
+      <UiTag variant="success">strict {{ metrics.strictEventCount }}</UiTag>
+      <UiTag variant="warning">ambiguous {{ metrics.ambiguousEventCount }}</UiTag>
+      <UiTag variant="danger">unsupported {{ metrics.unsupportedEventCount }}</UiTag>
+      <UiTag variant="muted">重复跳过 {{ metrics.duplicateSkippedCount }}</UiTag>
     </div>
 
     <div class="mt-4 grid gap-3 text-sm md:grid-cols-4">

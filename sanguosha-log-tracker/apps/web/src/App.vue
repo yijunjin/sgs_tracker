@@ -33,6 +33,7 @@ import DeckPanel from "./components/DeckPanel.vue"
 import OcrPanel from "./components/OcrPanel.vue"
 import ParsedEventsPanel from "./components/ParsedEventsPanel.vue"
 import RecentEvents from "./components/RecentEvents.vue"
+import UiTabs from "./components/ui/UiTabs.vue"
 import { useOcr } from "./composables/useOcr"
 import { cropDeckCountCanvas, prepareDeckCountOcrCanvas, useScreenCapture } from "./composables/useScreenCapture"
 import { useTrackerSession } from "./composables/useTrackerSession"
@@ -51,7 +52,7 @@ const autoSessionState = ref<AutoGameSessionState>(createAutoGameSessionState())
 const autoListening = ref(false)
 const autoStatus = ref("未启动")
 const autoError = ref("")
-const showAliasLearningCenter = ref(false)
+const activeModule = ref<"live" | "alias">("live")
 const lastOcrAt = ref("")
 const onlyNewVisibleLines = ref(true)
 const logProcessingOrder = ref<AutoListenEventOrder>("oldest-first")
@@ -67,6 +68,10 @@ const ocrMetrics = ref({
   duplicateSkippedCount: 0,
   lastOcrDurationMs: 0
 })
+const moduleTabs = [
+  { value: "live", label: "实时对局", icon: "▣" },
+  { value: "alias", label: "别名学习", icon: "⌘" }
+]
 let autoTimer: number | undefined
 let lastOcrAtMs = 0
 let dirtyAtMs = 0
@@ -84,6 +89,9 @@ const apiStatusLabel = computed(() => {
       return "检查中"
   }
 })
+
+const apiOnline = computed(() => session.apiStatus.value === "online")
+const ocrReady = computed(() => ocr.engineStatus.value === "ready")
 
 const autoModeLabel = computed(() => {
   switch (autoSessionState.value.mode) {
@@ -597,48 +605,50 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="min-h-screen px-4 py-6 text-slate-100 sm:px-6 lg:px-8">
-    <div class="mx-auto max-w-[1680px]">
-      <header class="glass-panel rounded-[2rem] px-6 py-5">
-        <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+  <div class="app-shell min-h-screen px-3 py-4 text-slate-100 sm:px-5">
+    <div class="mx-auto max-w-[1880px]">
+      <header class="app-header">
+        <div class="brand-lockup">
+          <div class="brand-mark">S</div>
           <div>
-            <p class="text-xs uppercase tracking-[0.3em] text-amber-300/80">sanguosha-log-tracker</p>
-            <h1 class="mt-2 text-2xl font-black text-white sm:text-3xl">三国杀日志 OCR 记牌器 MVP</h1>
-            <p class="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
-              本工具仅基于公开日志区域进行 OCR 统计，不读取隐藏信息，不抓包，不改包。
-            </p>
-          </div>
-
-          <div class="grid gap-3 sm:grid-cols-2">
-            <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-              <p class="text-xs uppercase tracking-[0.16em] text-slate-500">API 状态</p>
-              <p class="mt-2 text-sm font-semibold text-slate-100">{{ apiStatusLabel }}</p>
-              <p class="mt-1 text-xs text-slate-400">{{ session.statusMessage }}</p>
-            </div>
-            <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-              <p class="text-xs uppercase tracking-[0.16em] text-slate-500">OCR 状态</p>
-              <p class="mt-2 text-sm font-semibold text-slate-100">{{ ocr.engineStatus.value }}</p>
-              <p class="mt-1 text-xs text-slate-400">
-                {{ ocr.engineStatus.value === "ready" ? "真实 OCR 已就绪，可继续识别截图。" : "未就绪时也可以使用 Mock OCR 或手动文本体验完整流程。" }}
-              </p>
-            </div>
+            <h1>xxxxx</h1>
+            <p>公开日志 · OCR 记牌 · 不读取隐藏信息</p>
           </div>
         </div>
-        <div class="mt-4 flex flex-wrap gap-2">
-          <button class="action-button secondary-button" type="button" @click="session.endCurrentSession()">
+
+        <div class="header-actions">
+          <div class="status-pill" :class="apiOnline ? 'is-good' : 'is-muted'">
+            <span class="status-dot" />
+            <span>API {{ apiOnline ? "在线" : apiStatusLabel }}</span>
+          </div>
+          <div class="status-pill" :class="ocrReady ? 'is-good' : 'is-muted'">
+            <span class="status-dot" />
+            <span>OCR {{ ocrReady ? "ready" : ocr.engineStatus.value }}</span>
+          </div>
+          <label class="deck-switcher">
+            <span>当前牌堆:</span>
+            <select
+              :value="session.deckProfile.value.id"
+              @change="session.switchDeckProfile(($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="profile in session.deckProfiles" :key="profile.id" :value="profile.id">
+                {{ profile.name }}
+              </option>
+            </select>
+          </label>
+          <button class="action-button header-primary" type="button" @click="session.endCurrentSession()">
             结束本局并生成报告
-          </button>
-          <button class="action-button secondary-button" type="button" @click="showAliasLearningCenter = !showAliasLearningCenter">
-            {{ showAliasLearningCenter ? "收起别名学习中心" : "别名学习中心" }}
           </button>
         </div>
       </header>
 
-      <div v-if="showAliasLearningCenter" class="mt-6">
-        <AliasLearningCenter />
-      </div>
+      <UiTabs
+        :items="moduleTabs"
+        :model-value="activeModule"
+        @update:model-value="activeModule = $event as 'live' | 'alias'"
+      />
 
-      <main class="mt-6 grid gap-6 xl:grid-cols-[1.1fr_1.2fr_0.9fr]">
+      <main v-if="activeModule === 'live'" class="battle-grid">
         <div class="space-y-6">
           <CapturePanel
             ref="capturePanelRef"
@@ -746,6 +756,18 @@ onBeforeUnmount(() => {
             @reset="session.reset"
           />
         </div>
+
+        <footer class="system-strip xl:col-span-3">
+          <span>● 系统运行正常</span>
+          <span>↻ {{ autoListening ? "日志监听中" : "日志监听待机" }}</span>
+          <span>◉ 自动保存已开启</span>
+          <span class="ml-auto">© 2025 三国杀日志 OCR 记牌器</span>
+          <span>v1.0.0</span>
+        </footer>
+      </main>
+
+      <main v-else class="alias-page">
+        <AliasLearningCenter />
       </main>
     </div>
   </div>
