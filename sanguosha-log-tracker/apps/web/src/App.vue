@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue"
 import {
+  applySemanticEventDedupe,
+  CYCLE_TOTAL_EXCEED_NOTE,
   createAutoGameSessionState,
   createDeckRemainingSamplerState,
+  createSemanticEventDeduper,
   createVisibleLogDeduper,
   defaultAutoListenConfig,
   enterErrorMode,
@@ -18,11 +21,13 @@ import {
   updateDeckRemainingSample,
   type AutoGameSessionState,
   type AutoListenConfig,
+  type AutoListenEventOrder,
   type OcrLine,
   type ParsedLogEvent
 } from "@slt/shared"
 
 import CapturePanel from "./components/CapturePanel.vue"
+import AliasLearningCenter from "./components/AliasLearningCenter.vue"
 import CropPreview from "./components/CropPreview.vue"
 import DeckPanel from "./components/DeckPanel.vue"
 import OcrPanel from "./components/OcrPanel.vue"
@@ -39,14 +44,17 @@ const capturePanelRef = ref<{ getVideoElement: () => HTMLVideoElement | null } |
 
 const diffThreshold = 6
 const visibleLogDeduper = createVisibleLogDeduper()
+const semanticEventDeduper = createSemanticEventDeduper()
 const deckRemainingSampler = createDeckRemainingSamplerState()
 const autoListenConfig = ref<AutoListenConfig>({ ...defaultAutoListenConfig })
 const autoSessionState = ref<AutoGameSessionState>(createAutoGameSessionState())
 const autoListening = ref(false)
 const autoStatus = ref("未启动")
 const autoError = ref("")
+const showAliasLearningCenter = ref(false)
 const lastOcrAt = ref("")
 const onlyNewVisibleLines = ref(true)
+const logProcessingOrder = ref<AutoListenEventOrder>("oldest-first")
 const deckRemainingRawText = ref("")
 const ocrMetrics = ref({
   rawLineCount: 0,
@@ -63,6 +71,8 @@ let autoTimer: number | undefined
 let lastOcrAtMs = 0
 let dirtyAtMs = 0
 let previousFingerprint: Uint8ClampedArray | undefined
+
+const GAME_END_KEYWORDS = ["游戏结束", "本局结束", "胜利", "失败", "获得胜利", "对局结束", "返回房间", "进入结算"]
 
 const apiStatusLabel = computed(() => {
   switch (session.apiStatus.value) {
@@ -102,6 +112,62 @@ const autoModeNote = computed(() => {
 
 const latestStartSignal = computed(() => autoSessionState.value.lastStartSignal?.chooseLines.join(" | ") ?? "")
 const currentGameStartSignature = computed(() => autoSessionState.value.currentGameStartSignature ?? "")
+const logProcessingOrderLabel = computed(() =>
+  logProcessingOrder.value === "oldest-first" ? "oldest -> newest" : "newest -> oldest"
+)
+
+function orderLinesForProcessing<T>(lines: T[]): T[] {
+  return logProcessingOrder.value === "newest-first" ? [...lines].reverse() : lines
+}
+
+function hasGameEndSignal(lines: OcrLine[]): boolean {
+  const text = lines.map((line) => line.text).join("")
+  return GAME_END_KEYWORDS.some((keyword) => text.includes(keyword))
+}
+
+function primeSemanticWindow(lines: OcrLine[], source: "ocr" | "mock" = "ocr"): void {
+  const visibleEvents = parseLogInput(orderLinesForProcessing(lines), source, session.deckProfile.value)
+  semanticEventDeduper.prime(visibleEvents)
+}
+
+async function acceptEventWithGuard(eventId: string): Promise<void> {
+  const event = session.trackerState.value.events.find((item) => item.id === eventId)
+  if (!event) {
+    return
+  }
+
+  if (event.note?.includes(CYCLE_TOTAL_EXCEED_NOTE)) {
+    const confirmed = window.confirm("该事件会导致本轮已见超过牌库总数。仍然要强制接受吗？")
+    if (!confirmed) {
+      return
+    }
+  }
+
+  await session.updateEventStatus(eventId, "accepted")
+}
+
+async function markEventMisrecognized(eventId: string): Promise<void> {
+  const event = session.trackerState.value.events.find((item) => item.id === eventId)
+  if (!event) {
+    return
+  }
+
+  const reasonInput = window.prompt("误识别原因：牌名识别错 / 动作识别错 / 重复事件 / 玩家识别错 / 其他", "重复事件")
+  const reasonMap: Record<string, "misrecognized" | "wrongCard" | "wrongAction" | "duplicate" | "unsupported"> = {
+    牌名识别错: "wrongCard",
+    动作识别错: "wrongAction",
+    重复事件: "duplicate",
+    玩家识别错: "misrecognized",
+    其他: "misrecognized"
+  }
+  const reason = reasonMap[reasonInput ?? ""] ?? "misrecognized"
+  const correctedCardName = reason === "wrongCard" ? window.prompt("请输入正确牌名，用于对局结束后的别名挖掘", event.cardName ?? "") ?? undefined : undefined
+  await session.recordCorrection({
+    eventId,
+    reason,
+    ...(correctedCardName?.trim() ? { correctedCardName: correctedCardName.trim() } : {})
+  })
+}
 
 async function parseCurrentText(source: "ocr" | "manual" | "mock"): Promise<void> {
   if (!ocr.text.value.trim()) {
@@ -110,7 +176,16 @@ async function parseCurrentText(source: "ocr" | "manual" | "mock"): Promise<void
   }
 
   ocr.setError("")
-  const events = parseLogInput(ocr.text.value, source, session.deckProfile.value)
+  const events = applySemanticEventDedupe(
+    parseLogInput(ocr.text.value, source, session.deckProfile.value),
+    semanticEventDeduper
+  )
+  await session.recordOcrBatch({
+    rawLines: ocr.text.value.split(/\r?\n/).filter(Boolean),
+    mergedLines: ocr.text.value.split(/\r?\n/).filter(Boolean),
+    source,
+    ocrEngine: source === "manual" ? "manual" : source
+  })
   await session.ingestParsedEvents(events)
 }
 
@@ -143,6 +218,7 @@ function updateOcrMetrics(
 function primeVisibleLogBaseline(lines: OcrLine[]): void {
   visibleLogDeduper.reset()
   visibleLogDeduper.getNewLines(lines)
+  primeSemanticWindow(lines, "ocr")
 }
 
 function stopAutoTimerOnly(): void {
@@ -210,10 +286,19 @@ async function ingestOcrLines(
   onlyNewVisibleLines: boolean
 ): Promise<void> {
   const mergedLines = mergeBrokenOcrLines(rawLines, session.deckProfile.value)
+  await session.recordOcrBatch({
+    rawLines,
+    mergedLines,
+    source,
+    ocrEngine: source
+  })
   ocr.setRecognitionResult(rawLines, mergedLines)
   const linesForParse = onlyNewVisibleLines ? visibleLogDeduper.getNewLines(mergedLines) : mergedLines
   const dedupeStats = visibleLogDeduper.getLastStats()
-  const events = parseLogInput(linesForParse, source, session.deckProfile.value)
+  const events = applySemanticEventDedupe(
+    parseLogInput(orderLinesForProcessing(linesForParse), source, session.deckProfile.value),
+    semanticEventDeduper
+  )
   ocrMetrics.value = {
     ...ocrMetrics.value,
     rawLineCount: rawLines.length,
@@ -226,6 +311,7 @@ async function ingestOcrLines(
     duplicateSkippedCount: onlyNewVisibleLines ? dedupeStats.duplicateSkippedCount : 0
   }
   await session.ingestParsedEvents(events)
+  primeSemanticWindow(mergedLines, source)
 }
 
 async function runDeckRemainingOcr(sourceCanvas: HTMLCanvasElement | null, allowAutoConfirm = false): Promise<void> {
@@ -288,6 +374,12 @@ async function runAutoOcr(canvas: HTMLCanvasElement): Promise<void> {
     autoError.value = ""
     const rawLines = await ocr.runRealOcr(canvas)
     const mergedLines = mergeBrokenOcrLines(rawLines, session.deckProfile.value)
+    await session.recordOcrBatch({
+      rawLines,
+      mergedLines,
+      source: "ocr",
+      ocrEngine: "paddleocr"
+    })
     ocr.setRecognitionResult(rawLines, mergedLines)
 
     let linesForBatch = mergedLines
@@ -305,7 +397,10 @@ async function runAutoOcr(canvas: HTMLCanvasElement): Promise<void> {
       state: stateBeforeBatch,
       lines: linesForBatch,
       deckProfile: session.deckProfile.value,
+      trackerState: session.trackerState.value,
+      semanticDeduper: semanticEventDeduper,
       config: autoListenConfig.value,
+      eventOrder: logProcessingOrder.value,
       now: Date.now()
     })
 
@@ -315,9 +410,10 @@ async function runAutoOcr(canvas: HTMLCanvasElement): Promise<void> {
         mode: "gameStarting"
       }
       autoStatus.value = "检测到开局，正在重置本局"
-      await session.reset()
+      await session.endAndCreateSession()
       primeVisibleLogBaseline(mergedLines)
       await session.ingestParsedEvents(result.events)
+      primeSemanticWindow(mergedLines, "ocr")
       autoSessionState.value = result.nextState
       updateOcrMetrics(
         rawLines,
@@ -340,9 +436,15 @@ async function runAutoOcr(canvas: HTMLCanvasElement): Promise<void> {
       if (result.events.length > 0) {
         await session.ingestParsedEvents(result.events)
       }
+      primeSemanticWindow(mergedLines, "ocr")
       if (result.nextState.mode === "inGame") {
         const videoElement = capturePanelRef.value?.getVideoElement() ?? null
         await runDeckRemainingOcr(screen.captureCurrentSourceFrame(videoElement), true)
+      }
+      if (hasGameEndSignal(mergedLines)) {
+        await session.endCurrentSession()
+        autoStatus.value = "检测到对局结束，已生成报告并触发别名分析"
+        stopAutoListening("idle")
       }
       updateOcrMetrics(
         rawLines,
@@ -431,7 +533,7 @@ async function startManualNewGame(): Promise<void> {
     lastGameStartDetectedAt: Date.now()
   }
   autoStatus.value = "手动开始新局，正在重置本局"
-  await session.reset()
+  await session.endAndCreateSession()
   const currentLines = ocr.mergedLines.value.length > 0 ? ocr.mergedLines.value : ocr.lines.value
   primeVisibleLogBaseline(currentLines)
   autoSessionState.value = {
@@ -460,7 +562,10 @@ async function reprocessCurrentScreenshot(): Promise<void> {
   visibleLogDeduper.reset()
   const lines = ocr.mergedLines.value.length > 0 ? ocr.mergedLines.value : ocr.lines.value
   const linesForParse = visibleLogDeduper.getNewLines(lines)
-  const events = parseLogInput(linesForParse, "ocr", session.deckProfile.value)
+  const events = applySemanticEventDedupe(
+    parseLogInput(orderLinesForProcessing(linesForParse), "ocr", session.deckProfile.value),
+    semanticEventDeduper
+  )
   const dedupeStats = visibleLogDeduper.getLastStats()
   ocrMetrics.value = {
     ...ocrMetrics.value,
@@ -472,11 +577,13 @@ async function reprocessCurrentScreenshot(): Promise<void> {
     unsupportedEventCount: events.filter((event) => event.quality === "unsupported").length
   }
   await session.ingestParsedEvents(events)
+  primeSemanticWindow(lines, "ocr")
   autoStatus.value = "已重新处理当前截图"
 }
 
 function clearDedupeCache(): void {
   visibleLogDeduper.clear()
+  semanticEventDeduper.clear()
   autoStatus.value = "已清空去重缓存"
 }
 
@@ -517,7 +624,19 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
+        <div class="mt-4 flex flex-wrap gap-2">
+          <button class="action-button secondary-button" type="button" @click="session.endCurrentSession()">
+            结束本局并生成报告
+          </button>
+          <button class="action-button secondary-button" type="button" @click="showAliasLearningCenter = !showAliasLearningCenter">
+            {{ showAliasLearningCenter ? "收起别名学习中心" : "别名学习中心" }}
+          </button>
+        </div>
       </header>
+
+      <div v-if="showAliasLearningCenter" class="mt-6">
+        <AliasLearningCenter />
+      </div>
 
       <main class="mt-6 grid gap-6 xl:grid-cols-[1.1fr_1.2fr_0.9fr]">
         <div class="space-y-6">
@@ -569,6 +688,7 @@ onBeforeUnmount(() => {
             :last-ocr-at="lastOcrAt"
             :auto-error="autoError"
             :only-new-visible-lines="onlyNewVisibleLines"
+            :log-processing-order="logProcessingOrderLabel"
             :deck-remaining-raw-text="deckRemainingRawText"
             :stable-deck-remaining="session.trackerState.value.lastStableDeckRemaining"
             :auto-start-on-choose-general="autoListenConfig.autoStartOnChooseGeneral"
@@ -591,6 +711,7 @@ onBeforeUnmount(() => {
             @clear-dedupe="clearDedupeCache"
             @update:manual-text="ocr.setText"
             @update:only-new-visible-lines="onlyNewVisibleLines = $event"
+            @update:log-processing-order="logProcessingOrder = $event"
             @update:auto-start-on-choose-general="autoListenConfig.autoStartOnChooseGeneral = $event"
             @update:auto-reset-on-new-game="autoListenConfig.autoResetOnNewGame = $event"
             @update:auto-accept-strict-events="autoListenConfig.autoAcceptStrictEvents = $event"
@@ -599,7 +720,7 @@ onBeforeUnmount(() => {
 
           <ParsedEventsPanel
             :events="session.parsedEvents.value"
-            @accept="session.updateEventStatus($event, 'accepted')"
+            @accept="acceptEventWithGuard"
             @reject="session.updateEventStatus($event, 'rejected')"
             @accept-high-confidence="session.acceptAllHighConfidence()"
           />
@@ -621,7 +742,7 @@ onBeforeUnmount(() => {
             :recent-events="session.trackerState.value.recentEvents"
             @undo="session.undo"
             @undo-event="session.undoOne"
-            @mark-misrecognized="session.updateEventStatus($event, 'rejected')"
+            @mark-misrecognized="markEventMisrecognized"
             @reset="session.reset"
           />
         </div>

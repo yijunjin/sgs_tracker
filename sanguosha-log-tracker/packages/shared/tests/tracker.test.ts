@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
-import { oneVOneDeckProfile } from "../src/cards"
-import { applyEvent, confirmReshuffle, createInitialTrackerState, undoLastEvent } from "../src/tracker"
+import { happyTwoVTwoDeckProfile, oneVOneDeckProfile } from "../src/cards"
+import { applyEvent, confirmReshuffle, createInitialTrackerState, rejectEvent, undoLastEvent, wouldExceedCycleTotal } from "../src/tracker"
 import type { ParsedLogEvent } from "../src/types"
 
 function createEvent(partial: Partial<ParsedLogEvent>): ParsedLogEvent {
@@ -93,11 +93,11 @@ describe("tracker", () => {
     )
 
     expect(nextState.cycleSeenCounts["过河拆桥"]).toBe(1)
-    expect(nextState.knownCardsByPlayer["郭嘉（您）"]?.["过河拆桥"]).toBe(1)
+    expect(nextState.knownCardsByPlayer["__self__"]?.["过河拆桥"]).toBe(1)
   })
 
   it("consumes known hand card without double-counting later use", () => {
-    let state = createInitialTrackerState(oneVOneDeckProfile)
+    let state = createInitialTrackerState(happyTwoVTwoDeckProfile)
     state = applyEvent(
       state,
       createEvent({
@@ -121,8 +121,37 @@ describe("tracker", () => {
 
     expect(state.cycleSeenCounts["过河拆桥"]).toBe(1)
     expect(state.historySeenCounts["过河拆桥"]).toBe(1)
-    expect(state.knownCardsByPlayer["郭嘉（您）"]?.["过河拆桥"]).toBeUndefined()
+    expect(state.knownCardsByPlayer["__self__"]?.["过河拆桥"]).toBeUndefined()
     expect(state.events.find((event) => event.id === "use-known")).toMatchObject({ impactCount: 0 })
+  })
+
+  it("uses canonical player key for dirty gainKnown then clean use", () => {
+    let state = createInitialTrackerState(happyTwoVTwoDeckProfile)
+    state = applyEvent(
+      state,
+      createEvent({
+        id: "dirty-gain",
+        rawText: "流马5英魂奔雷木牛流马界孙坚（您）从摸牌堆获得闪电",
+        playerName: "流马5英魂奔雷木牛流马界孙坚（您）",
+        action: "gainKnown",
+        cardName: "闪电",
+        cardNames: ["闪电"]
+      })
+    )
+    state = applyEvent(
+      state,
+      createEvent({
+        id: "clean-use",
+        rawText: "界孙坚（您）使用闪电",
+        playerName: "界孙坚（您）",
+        action: "use",
+        cardName: "闪电"
+      })
+    )
+
+    expect(state.cycleSeenCounts["闪电"]).toBe(1)
+    expect(state.events.find((event) => event.id === "clean-use")).toMatchObject({ impactCount: 0, consumedKnownCard: true })
+    expect(state.knownCardsByPlayer["__self__"]?.["闪电"]).toBeUndefined()
   })
 
   it("counts judge cards as newly seen", () => {
@@ -148,7 +177,7 @@ describe("tracker", () => {
   })
 
   it("does not warn when only history exceeds total counts", () => {
-    let state = createInitialTrackerState(oneVOneDeckProfile)
+    let state = createInitialTrackerState(happyTwoVTwoDeckProfile)
     for (let index = 0; index < 9; index += 1) {
       state = applyEvent(state, createEvent({ id: `flash-${index}`, cardName: "闪", rawText: `郭嘉使用闪${index}` }))
     }
@@ -174,11 +203,29 @@ describe("tracker", () => {
     state = applyEvent(state, createEvent({ id: "use-known", playerName: "郭嘉（您）", action: "use", cardName: "过河拆桥" }))
 
     const undoneUse = undoLastEvent(state)
-    expect(undoneUse.knownCardsByPlayer["郭嘉（您）"]?.["过河拆桥"]).toBe(1)
+    expect(undoneUse.knownCardsByPlayer["__self__"]?.["过河拆桥"]).toBe(1)
     expect(undoneUse.cycleSeenCounts["过河拆桥"]).toBe(1)
 
     const undoneGain = undoLastEvent(undoneUse)
-    expect(undoneGain.knownCardsByPlayer["郭嘉（您）"]?.["过河拆桥"]).toBeUndefined()
+    expect(undoneGain.knownCardsByPlayer["__self__"]?.["过河拆桥"]).toBeUndefined()
     expect(undoneGain.cycleSeenCounts["过河拆桥"]).toBe(0)
   })
+
+  it("rolls back counts when marking an accepted event misrecognized", () => {
+    let state = createInitialTrackerState(happyTwoVTwoDeckProfile)
+    state = applyEvent(state, createEvent({ id: "lightning", playerName: "界孙坚（您）", cardName: "闪电" }))
+
+    const rejected = rejectEvent(state, "lightning")
+    expect(rejected.cycleSeenCounts["闪电"]).toBe(0)
+    expect(rejected.historySeenCounts["闪电"]).toBe(0)
+  })
+
+  it("detects over-limit before auto accept", () => {
+    let state = createInitialTrackerState(happyTwoVTwoDeckProfile)
+    state = applyEvent(state, createEvent({ id: "lightning-1", playerName: "界孙坚（您）", cardName: "闪电" }))
+    state = applyEvent(state, createEvent({ id: "lightning-2", playerName: "郭嘉", cardName: "闪电" }))
+
+    expect(wouldExceedCycleTotal(state, createEvent({ id: "lightning-3", playerName: "黄月英", cardName: "闪电", status: "pending" }))).toBe(true)
+  })
 })
+

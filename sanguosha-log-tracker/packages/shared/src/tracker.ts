@@ -1,6 +1,10 @@
 import { getDeckCardNames, getDeckTotalCounts, isCardInDeck } from "./cards"
 import { normalizeText } from "./normalize"
+import { canonicalPlayerKey, canonicalTargetKey, isSuspiciousPlayerName } from "./player"
 import type { CardName, DeckProfile, ParsedLogEvent, ReshuffleAlert, TrackerState, TrackerWarning } from "./types"
+
+export const CYCLE_TOTAL_EXCEED_NOTE =
+  "接受此事件会导致本轮已见超过牌库总数，疑似重复识别、误解析、洗牌未确认或牌库模式错误"
 
 function emptyCounts(deckProfile: DeckProfile): Record<CardName, number> {
   return Object.fromEntries(getDeckCardNames(deckProfile).map((cardName) => [cardName, 0]))
@@ -86,7 +90,10 @@ function normalizeEventForDeck(deckProfile: DeckProfile, event: ParsedLogEvent):
     ...event,
     normalizedText: normalizeText(event.rawText),
     normalizedRawText: normalizeText(event.rawText),
-    fingerprint: normalizeText(event.fingerprint || event.rawText).replace(/\s+/g, "")
+    fingerprint: normalizeText(event.fingerprint || event.rawText).replace(/\s+/g, ""),
+    canonicalPlayerKey: event.canonicalPlayerKey ?? canonicalPlayerKey(event.playerName),
+    canonicalTargetKey: event.canonicalTargetKey ?? canonicalTargetKey(event.targetName),
+    suspiciousPlayerName: event.suspiciousPlayerName ?? isSuspiciousPlayerName(event.playerName)
   }
 
   if (!normalized.cardName) {
@@ -124,6 +131,7 @@ function shouldAffectCounts(
     event.supportStatus !== "unsupported" &&
     event.action !== "ignore" &&
     event.action !== "unknown" &&
+    event.duplicate !== true &&
     Boolean(event.cardName) &&
     isCardInDeck(deckProfile, event.cardName)
   )
@@ -133,28 +141,48 @@ function addCount(counts: Record<CardName, number>, cardName: CardName, delta: n
   counts[cardName] = Math.max(0, (counts[cardName] ?? 0) + delta)
 }
 
+function getKnownCardPlayerKey(playerName: string | undefined): string | undefined {
+  return canonicalPlayerKey(playerName)
+}
+
+function getEventCardNames(event: Pick<ParsedLogEvent, "cardName" | "cardNames">): CardName[] {
+  if (event.cardNames?.length) {
+    return event.cardNames
+  }
+
+  return event.cardName ? [event.cardName] : []
+}
+
+function countEventCardNames(event: Pick<ParsedLogEvent, "cardName" | "cardNames">): Record<CardName, number> {
+  return getEventCardNames(event).reduce<Record<CardName, number>>((counts, cardName) => {
+    counts[cardName] = (counts[cardName] ?? 0) + 1
+    return counts
+  }, {})
+}
+
 function addKnownCard(
   knownCardsByPlayer: Record<string, Record<CardName, number>>,
   playerName: string | undefined,
   cardName: CardName,
   delta: number
 ): void {
-  if (!playerName) {
+  const playerKey = getKnownCardPlayerKey(playerName)
+  if (!playerKey) {
     return
   }
 
-  const playerCards = knownCardsByPlayer[playerName] ?? {}
+  const playerCards = knownCardsByPlayer[playerKey] ?? {}
   playerCards[cardName] = Math.max(0, (playerCards[cardName] ?? 0) + delta)
   if (playerCards[cardName] === 0) {
     delete playerCards[cardName]
   }
 
   if (Object.keys(playerCards).length === 0) {
-    delete knownCardsByPlayer[playerName]
+    delete knownCardsByPlayer[playerKey]
     return
   }
 
-  knownCardsByPlayer[playerName] = playerCards
+  knownCardsByPlayer[playerKey] = playerCards
 }
 
 function consumeKnownCard(
@@ -162,17 +190,44 @@ function consumeKnownCard(
   playerName: string | undefined,
   cardName: CardName
 ): boolean {
-  if (!playerName) {
+  const playerKey = getKnownCardPlayerKey(playerName)
+  if (!playerKey) {
     return false
   }
 
-  const current = knownCardsByPlayer[playerName]?.[cardName] ?? 0
+  const current = knownCardsByPlayer[playerKey]?.[cardName] ?? 0
   if (current <= 0) {
     return false
   }
 
   addKnownCard(knownCardsByPlayer, playerName, cardName, -1)
   return true
+}
+
+export function wouldExceedCycleTotal(state: TrackerState, event: ParsedLogEvent): boolean {
+  if (
+    event.action === "ignore" ||
+    event.action === "unknown" ||
+    event.quality === "ignored" ||
+    event.quality === "unsupported" ||
+    event.supportStatus === "unsupported" ||
+    !event.cardName
+  ) {
+    return false
+  }
+
+  if (event.action === "use" || event.action === "play" || event.action === "discard" || event.action === "equip") {
+    if (consumeKnownCard(cloneKnownCards(state.knownCardsByPlayer), event.playerName, event.cardName)) {
+      return false
+    }
+
+    return (state.cycleSeenCounts[event.cardName] ?? 0) + 1 > (state.totalCounts[event.cardName] ?? 0)
+  }
+
+  const eventCardCounts = countEventCardNames(event)
+  return Object.entries(eventCardCounts).some(
+    ([cardName, delta]) => (state.cycleSeenCounts[cardName] ?? 0) + delta > (state.totalCounts[cardName] ?? 0)
+  )
 }
 
 function recomputeDerivedCounts(state: TrackerState): void {
@@ -203,23 +258,37 @@ function removeLastAcceptedHistory(acceptedHistory: string[], eventId: string): 
 }
 
 function applyAcceptedImpact(state: TrackerState, event: ParsedLogEvent & { cardName: CardName }): ParsedLogEvent {
-  const nextEvent = { ...event, cycleId: event.cycleId ?? state.cycleId }
+  const nextEvent = {
+    ...event,
+    cycleId: event.cycleId ?? state.cycleId,
+    canonicalPlayerKey: event.canonicalPlayerKey ?? canonicalPlayerKey(event.playerName),
+    canonicalTargetKey: event.canonicalTargetKey ?? canonicalTargetKey(event.targetName)
+  }
   const action = nextEvent.action
+  const eventCardNames = getEventCardNames(nextEvent)
 
   if (action === "gainKnown") {
-    addCount(state.historySeenCounts, nextEvent.cardName, 1)
-    addCount(state.cycleSeenCounts, nextEvent.cardName, 1)
-    addKnownCard(state.knownCardsByPlayer, nextEvent.playerName, nextEvent.cardName, 1)
+    for (const cardName of eventCardNames) {
+      addCount(state.historySeenCounts, cardName, 1)
+      addCount(state.cycleSeenCounts, cardName, 1)
+      addKnownCard(state.knownCardsByPlayer, nextEvent.playerName, cardName, 1)
+    }
     return {
       ...nextEvent,
       impactCount: 1,
-      note: nextEvent.note ?? "公开日志显示从摸牌堆获得具名牌，已加入该玩家已知手牌。"
+      note:
+        nextEvent.note ??
+        (eventCardNames.length > 1
+          ? `公开日志显示从摸牌堆获得 ${eventCardNames.length} 张具名牌，已加入该玩家已知手牌。`
+          : "公开日志显示从摸牌堆获得具名牌，已加入该玩家已知手牌。")
     }
   }
 
   if (action === "judge") {
-    addCount(state.historySeenCounts, nextEvent.cardName, 1)
-    addCount(state.cycleSeenCounts, nextEvent.cardName, 1)
+    for (const cardName of eventCardNames) {
+      addCount(state.historySeenCounts, cardName, 1)
+      addCount(state.cycleSeenCounts, cardName, 1)
+    }
     return {
       ...nextEvent,
       impactCount: 1
@@ -233,6 +302,7 @@ function applyAcceptedImpact(state: TrackerState, event: ParsedLogEvent & { card
       return {
         ...nextEvent,
         impactCount: 0,
+        consumedKnownCard: true,
         note: nextEvent.note
           ? `${nextEvent.note}；消耗已知手牌，未重复计入已见牌。`
           : "消耗已知手牌，未重复计入已见牌。"
@@ -243,7 +313,8 @@ function applyAcceptedImpact(state: TrackerState, event: ParsedLogEvent & { card
     addCount(state.cycleSeenCounts, nextEvent.cardName, 1)
     return {
       ...nextEvent,
-      impactCount: 1
+      impactCount: 1,
+      consumedKnownCard: false
     }
   }
 
@@ -252,15 +323,24 @@ function applyAcceptedImpact(state: TrackerState, event: ParsedLogEvent & { card
 
 function revertAcceptedImpact(state: TrackerState, event: ParsedLogEvent & { cardName: CardName }): void {
   if (event.action === "gainKnown") {
+    const eventCardNames = getEventCardNames(event)
     if (event.impactCount === 1) {
-      addCount(state.historySeenCounts, event.cardName, -1)
-      addCount(state.cycleSeenCounts, event.cardName, -1)
+      for (const cardName of eventCardNames) {
+        addCount(state.historySeenCounts, cardName, -1)
+        addCount(state.cycleSeenCounts, cardName, -1)
+      }
     }
-    addKnownCard(state.knownCardsByPlayer, event.playerName, event.cardName, -1)
+    for (const cardName of eventCardNames) {
+      addKnownCard(state.knownCardsByPlayer, event.playerName, cardName, -1)
+    }
     return
   }
 
-  if (event.impactCount === 0 && (event.action === "use" || event.action === "play" || event.action === "discard" || event.action === "equip")) {
+  if (
+    event.impactCount === 0 &&
+    event.consumedKnownCard &&
+    (event.action === "use" || event.action === "play" || event.action === "discard" || event.action === "equip")
+  ) {
     addKnownCard(state.knownCardsByPlayer, event.playerName, event.cardName, 1)
     return
   }

@@ -16,6 +16,7 @@ defineProps<{
   lastOcrAt: string
   autoError: string
   onlyNewVisibleLines: boolean
+  logProcessingOrder: "oldest -> newest" | "newest -> oldest"
   deckRemainingRawText: string
   stableDeckRemaining?: number | undefined
   autoStartOnChooseGeneral: boolean
@@ -51,6 +52,7 @@ const emit = defineEmits<{
   (event: "clear-dedupe"): void
   (event: "update:manualText", value: string): void
   (event: "update:onlyNewVisibleLines", value: boolean): void
+  (event: "update:logProcessingOrder", value: "oldest-first" | "newest-first"): void
   (event: "update:autoStartOnChooseGeneral", value: boolean): void
   (event: "update:autoResetOnNewGame", value: boolean): void
   (event: "update:autoAcceptStrictEvents", value: boolean): void
@@ -206,6 +208,18 @@ const statusLabelMap = {
           仅处理新增日志行
         </span>
       </label>
+      <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+        <p class="text-xs text-slate-500">日志处理顺序</p>
+        <p class="mt-1 font-semibold text-slate-100">{{ logProcessingOrder }}</p>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <button class="action-button secondary-button" type="button" @click="emit('update:logProcessingOrder', 'oldest-first')">
+            oldest -> newest
+          </button>
+          <button class="action-button secondary-button" type="button" @click="emit('update:logProcessingOrder', 'newest-first')">
+            newest -> oldest
+          </button>
+        </div>
+      </div>
       <div class="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
         <p class="text-xs text-slate-500">本轮 OCR 耗时</p>
         <p class="mt-1 font-semibold text-slate-100">{{ metrics.lastOcrDurationMs }}ms</p>

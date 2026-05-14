@@ -1,7 +1,11 @@
 import { isCardInDeck } from "./cards"
+import { applySemanticEventDedupe, type SemanticEventDeduper } from "./dedupe"
 import { parseLogInput } from "./parser"
 import { createGameStartSignature, detectGameStartSignal, type GameStartSignal } from "./startSignal"
-import type { DeckProfile, OcrLine, ParsedLogEvent } from "./types"
+import { applyEvent, CYCLE_TOTAL_EXCEED_NOTE, wouldExceedCycleTotal } from "./tracker"
+import type { DeckProfile, OcrLine, ParsedLogEvent, TrackerState } from "./types"
+
+export type AutoListenEventOrder = "oldest-first" | "newest-first"
 
 export type AutoListenMode =
   | "idle"
@@ -61,6 +65,10 @@ export type AutoListenBatchResult = {
 }
 
 const GAME_START_COOLDOWN_MS = 30_000
+
+function orderLinesForParsing(lines: OcrLine[], eventOrder: AutoListenEventOrder): OcrLine[] {
+  return eventOrder === "newest-first" ? [...lines].reverse() : lines
+}
 
 export function createAutoGameSessionState(): AutoGameSessionState {
   return {
@@ -128,7 +136,8 @@ export function shouldAutoAcceptEvent(event: ParsedLogEvent, deckProfile: DeckPr
 function autoAcceptEvents(
   events: ParsedLogEvent[],
   deckProfile: DeckProfile,
-  enabled: boolean
+  enabled: boolean,
+  trackerState?: TrackerState
 ): { events: ParsedLogEvent[]; autoAcceptedEventIds: string[] } {
   if (!enabled) {
     return {
@@ -138,16 +147,31 @@ function autoAcceptEvents(
   }
 
   const autoAcceptedEventIds: string[] = []
+  let simulatedState = trackerState
   const nextEvents = events.map((event) => {
     if (!shouldAutoAcceptEvent(event, deckProfile)) {
       return event
     }
 
+    if (simulatedState && wouldExceedCycleTotal(simulatedState, event)) {
+      return {
+        ...event,
+        autoAcceptable: false,
+        note: event.note ? `${event.note}；${CYCLE_TOTAL_EXCEED_NOTE}` : CYCLE_TOTAL_EXCEED_NOTE
+      } satisfies ParsedLogEvent
+    }
+
     autoAcceptedEventIds.push(event.id)
-    return {
+    const acceptedEvent = {
       ...event,
       status: "accepted"
     } satisfies ParsedLogEvent
+
+    if (simulatedState) {
+      simulatedState = applyEvent(simulatedState, acceptedEvent)
+    }
+
+    return acceptedEvent
   })
 
   return {
@@ -186,12 +210,16 @@ export function processAutoListenBatch(args: {
   state: AutoGameSessionState
   lines: OcrLine[]
   deckProfile: DeckProfile
+  trackerState?: TrackerState
+  semanticDeduper?: SemanticEventDeduper
   config?: Partial<AutoListenConfig>
+  eventOrder?: AutoListenEventOrder
   source?: ParsedLogEvent["source"]
   now?: number
   forceStartNewGame?: boolean
 }): AutoListenBatchResult {
   const config = { ...defaultAutoListenConfig, ...args.config }
+  const eventOrder = args.eventOrder ?? "oldest-first"
   const source = args.source ?? "ocr"
   const now = args.now ?? Date.now()
   const signal = detectGameStartSignal(args.lines, config.startSignalMinChooseLines)
@@ -225,8 +253,14 @@ export function processAutoListenBatch(args: {
     }
 
     const lastChooseIndex = Math.max(...signal.chooseLineIndexes)
-    const parsedEvents = parseLogInput(args.lines.slice(lastChooseIndex + 1), source, args.deckProfile)
-    const { events, autoAcceptedEventIds } = autoAcceptEvents(parsedEvents, args.deckProfile, config.autoAcceptStrictEvents)
+    const parsedEvents = parseLogInput(orderLinesForParsing(args.lines.slice(lastChooseIndex + 1), eventOrder), source, args.deckProfile)
+    const dedupedEvents = applySemanticEventDedupe(parsedEvents, args.semanticDeduper)
+    const { events, autoAcceptedEventIds } = autoAcceptEvents(
+      dedupedEvents,
+      args.deckProfile,
+      config.autoAcceptStrictEvents,
+      args.trackerState
+    )
 
     return {
       nextState: {
@@ -260,8 +294,14 @@ export function processAutoListenBatch(args: {
     }
   }
 
-  const parsedEvents = parseLogInput(args.lines, source, args.deckProfile)
-  const { events, autoAcceptedEventIds } = autoAcceptEvents(parsedEvents, args.deckProfile, config.autoAcceptStrictEvents)
+  const parsedEvents = parseLogInput(orderLinesForParsing(args.lines, eventOrder), source, args.deckProfile)
+  const dedupedEvents = applySemanticEventDedupe(parsedEvents, args.semanticDeduper)
+  const { events, autoAcceptedEventIds } = autoAcceptEvents(
+    dedupedEvents,
+    args.deckProfile,
+    config.autoAcceptStrictEvents,
+    args.trackerState
+  )
 
   return {
     nextState: {

@@ -1,5 +1,6 @@
 import { normalizeText } from "./normalize"
-import type { OcrLine } from "./types"
+import { canonicalPlayerKey, canonicalTargetKey } from "./player"
+import type { OcrLine, ParsedLogEvent } from "./types"
 
 function fingerprintLine(line: OcrLine | string): string {
   const text = typeof line === "string" ? line : line.text
@@ -69,5 +70,112 @@ export function createVisibleLogDeduper() {
     getLastStats: () => ({ ...lastStats }),
     reset,
     clear: reset
+  }
+}
+
+function normalizeSemanticCardList(event: ParsedLogEvent): string | undefined {
+  const cardNames = event.cardNames?.length ? event.cardNames : event.cardName ? [event.cardName] : []
+  if (cardNames.length === 0) {
+    return undefined
+  }
+
+  return cardNames.join(",")
+}
+
+export function createSemanticEventKey(event: ParsedLogEvent): string | undefined {
+  if (event.action === "ignore" || event.action === "unknown") {
+    return undefined
+  }
+
+  const cycleId = event.cycleId ?? 0
+  const playerKey = event.canonicalPlayerKey ?? canonicalPlayerKey(event.playerName) ?? "-"
+  const targetKey = event.canonicalTargetKey ?? canonicalTargetKey(event.targetName) ?? "-"
+  const cardKey = event.action === "gainKnown" ? normalizeSemanticCardList(event) : event.cardName
+
+  if (!cardKey && event.action !== "convert") {
+    return undefined
+  }
+
+  return [cycleId, playerKey, targetKey, event.action, cardKey ?? "-"].join("|")
+}
+
+export type SemanticEventDeduper = {
+  markAndCheck(event: ParsedLogEvent): {
+    duplicate: boolean
+    reason?: string
+  }
+  clear(): void
+  prime(events: ParsedLogEvent[]): void
+}
+
+export function applySemanticEventDedupe(
+  events: ParsedLogEvent[],
+  semanticDeduper?: SemanticEventDeduper
+): ParsedLogEvent[] {
+  if (!semanticDeduper) {
+    return events
+  }
+
+  return events.map((event) => {
+    if (event.action === "ignore" || event.action === "unknown" || event.supportStatus === "unsupported") {
+      return event
+    }
+
+    const dedupeResult = semanticDeduper.markAndCheck(event)
+    if (!dedupeResult.duplicate) {
+      return event
+    }
+
+    return {
+      ...event,
+      duplicate: true,
+      status: "ignored",
+      quality: "ignored",
+      autoAcceptable: false,
+      note: event.note ? `${event.note}；语义重复，已跳过` : dedupeResult.reason ?? "语义重复，已跳过"
+    } satisfies ParsedLogEvent
+  })
+}
+
+export function createSemanticEventDeduper(): SemanticEventDeduper {
+  let currentBatchKeys = new Set<string>()
+  let visibleWindowKeys = new Set<string>()
+
+  function markAndCheck(event: ParsedLogEvent): { duplicate: boolean; reason?: string } {
+    const semanticKey = createSemanticEventKey(event)
+    if (!semanticKey) {
+      return { duplicate: false }
+    }
+
+    if (currentBatchKeys.has(semanticKey)) {
+      return { duplicate: true, reason: "同一 OCR 批次语义重复" }
+    }
+
+    currentBatchKeys.add(semanticKey)
+    if (visibleWindowKeys.has(semanticKey)) {
+      return { duplicate: true, reason: "当前可见日志窗口语义重复" }
+    }
+
+    return { duplicate: false }
+  }
+
+  function clear(): void {
+    currentBatchKeys = new Set()
+    visibleWindowKeys = new Set()
+  }
+
+  function prime(events: ParsedLogEvent[]): void {
+    visibleWindowKeys = new Set(
+      events
+        .map((event) => createSemanticEventKey(event))
+        .filter((semanticKey): semanticKey is string => Boolean(semanticKey))
+    )
+    currentBatchKeys = new Set()
+  }
+
+  return {
+    markAndCheck,
+    clear,
+    prime
   }
 }

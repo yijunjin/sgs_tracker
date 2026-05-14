@@ -4,10 +4,12 @@ import {
   findKnownCardNameByLongestMatch,
   normalizeCardName,
   normalizeSuit,
-  normalizeText
+  normalizeText,
+  normalizeTextWithAliases
 } from "./normalize"
+import { canonicalPlayerKey, canonicalTargetKey, isSuspiciousPlayerName } from "./player"
 import { isChooseGeneralLine } from "./startSignal"
-import type { DeckProfile, OcrLine, ParsedLogEvent, ParseQuality } from "./types"
+import type { CardName, DeckProfile, OcrLine, ParsedLogEvent, ParseQuality } from "./types"
 
 const BRACKETED_CARD_PATTERN =
   /^(?<player>.+?)(?<verb>使用了|使用|打出了|打出|弃置了|弃置|装备了|装备|判定牌为)【(?<content>.+?)】$/u
@@ -16,7 +18,7 @@ const TARGET_USE_PATTERN = /^(?<player>.+?)对(?<target>.+?)使用(?<content>.+)
 const LET_EQUIP_PATTERN = /^(?<player>.+?)让(?<target>.+?)装备(?<content>.+)$/u
 const DIRECT_ACTION_PATTERN = /^(?<player>.+?)(?<verb>使用|打出|弃置|装备)(?<content>.+)$/u
 const JUDGE_RESULT_PATTERN = /^(?<player>.+?)的(?<judgeName>.+?)判定结果是(?<content>.+)$/u
-const GAIN_KNOWN_PATTERN = /^(?<player>.+?)从摸牌堆获得(?<content>.+)$/u
+const GAIN_KNOWN_PATTERN = /^(?<player>.+?)从(?<source>摸牌堆|五谷丰登)获得(?<content>.+)$/u
 const DRAW_NUMBER_PATTERN = /^(?<player>.+?)(?:从摸牌堆)?获得[1-9]\d*张牌$/u
 const SUIT_RANK_CARD_PATTERN = /^(?<suit>黑桃|红桃|梅花|方片|方块)?(?<rank>A|10|[2-9JQK])?\s*(?<card>.+)$/u
 const SUIT_ONLY_PATTERN = /(黑桃|红桃|梅花|方片|方块)(A|10|[2-9JQK])?$/u
@@ -41,6 +43,8 @@ const IGNORE_PATTERNS = [
 ]
 
 const ACTION_KEYWORDS = ["使用", "打出", "弃置", "装备", "判定结果是", "从摸牌堆获得", "获得", "发动", "生效"]
+const CONFLICTING_ACTION_KEYWORDS = ["使用", "打出", "获得", "判定", "装备", "弃置"]
+const PURE_DRAW_COUNT_PATTERN = /^(?:[1-9]\d*|[一二三四五六七八九十两]+)张牌$/u
 
 function createEventId(seed: string, index: number): string {
   const suffix = `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`
@@ -54,9 +58,18 @@ function createBaseEvent(
   index: number
 ): Pick<
   ParsedLogEvent,
-  "id" | "rawText" | "normalizedText" | "normalizedRawText" | "confidence" | "source" | "fingerprint" | "createdAt"
+  | "id"
+  | "rawText"
+  | "normalizedText"
+  | "normalizedRawText"
+  | "confidence"
+  | "source"
+  | "appliedAliases"
+  | "fingerprint"
+  | "createdAt"
 > {
-  const normalizedText = normalizeText(rawText)
+  const normalized = normalizeTextWithAliases(rawText)
+  const normalizedText = normalized.text
   const fingerprint = normalizedText.replace(/\s+/g, "")
   return {
     id: createEventId(fingerprint, index),
@@ -65,8 +78,18 @@ function createBaseEvent(
     normalizedRawText: normalizedText,
     confidence,
     source,
+    appliedAliases: normalized.appliedAliases,
     fingerprint,
     createdAt: new Date().toISOString()
+  }
+}
+
+function enrichActorKeys(event: ParsedLogEvent): ParsedLogEvent {
+  return {
+    ...event,
+    canonicalPlayerKey: canonicalPlayerKey(event.playerName),
+    canonicalTargetKey: canonicalTargetKey(event.targetName),
+    suspiciousPlayerName: isSuspiciousPlayerName(event.playerName)
   }
 }
 
@@ -95,11 +118,11 @@ function withQuality(
   quality: ParseQuality,
   autoAcceptable = quality === "strict"
 ): ParsedLogEvent {
-  return {
+  return enrichActorKeys({
     ...event,
     quality,
     autoAcceptable: quality === "strict" && autoAcceptable
-  }
+  })
 }
 
 function applyDeckSupport(event: ParsedLogEvent, deckProfile: DeckProfile): ParsedLogEvent {
@@ -179,6 +202,24 @@ function findAllKnownCardNames(text: string): string[] {
   )
 }
 
+function findGainKnownCardNames(content: string, deckProfile: DeckProfile): CardName[] {
+  const normalizedContent = normalizeText(content)
+  const segments = normalizedContent
+    .split(/[，,、]/u)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+
+  const cardNames = (segments.length > 0 ? segments : [normalizedContent])
+    .map((segment) => resolveCardDetail(segment, deckProfile).cardName)
+    .filter((cardName): cardName is CardName => Boolean(cardName && isCardInDeck(deckProfile, cardName)))
+
+  return cardNames
+}
+
+function hasConflictingActionKeywords(text: string): boolean {
+  return countMatches(normalizeText(text), CONFLICTING_ACTION_KEYWORDS) > 1
+}
+
 function isSuspiciousContent(content: string): boolean {
   const normalized = normalizeText(content)
   return countMatches(normalized, ACTION_KEYWORDS) > 0 || findAllKnownCardNames(normalized).length > 1 || /[·•]/u.test(normalized)
@@ -191,7 +232,7 @@ function parseIgnoredLine(
   index: number
 ): ParsedLogEvent {
   const normalizedText = normalizeText(rawText)
-  return {
+  return enrichActorKeys({
     ...createBaseEvent(rawText, confidence, source, index),
     action: "ignore",
     confidence,
@@ -200,7 +241,7 @@ function parseIgnoredLine(
     quality: "ignored",
     autoAcceptable: false,
     note: isChooseGeneralLine(normalizedText) ? "开局选择武将标记，不计入牌库" : "不代表公开牌出现，已忽略。"
-  }
+  })
 }
 
 function parseAmbiguousLine(
@@ -210,7 +251,7 @@ function parseAmbiguousLine(
   index: number,
   note: string
 ): ParsedLogEvent {
-  return {
+  return enrichActorKeys({
     ...createBaseEvent(rawText, confidence, source, index),
     action: "unknown",
     confidence,
@@ -219,7 +260,7 @@ function parseAmbiguousLine(
     quality: "ambiguous",
     autoAcceptable: false,
     note
-  }
+  })
 }
 
 function parseSingleLine(
@@ -242,22 +283,49 @@ function parseSingleLine(
 
   const gainKnownMatch = normalizedText.match(GAIN_KNOWN_PATTERN)
   if (gainKnownMatch?.groups) {
-    const detail = resolveCardDetail(gainKnownMatch.groups.content ?? "", deckProfile)
+    const playerName = gainKnownMatch.groups.player
+    const sourceName = gainKnownMatch.groups.source ?? "摸牌堆"
+    const content = gainKnownMatch.groups.content ?? ""
+    const cardNames = findGainKnownCardNames(content, deckProfile)
+    const detail = resolveCardDetail(content, deckProfile)
+    const suspiciousPlayer = isSuspiciousPlayerName(playerName)
+    const conflictingActions = hasConflictingActionKeywords(normalizedText)
+
+    if (PURE_DRAW_COUNT_PATTERN.test(normalizeText(content))) {
+      return parseIgnoredLine(rawText, confidence, source, index)
+    }
+
+    const noteParts = [detail.cardName || cardNames.length > 0 ? `公开日志显示从${sourceName}获得具名牌` : detail.note]
+    if (suspiciousPlayer) {
+      noteParts.push("玩家名区域异常，疑似 OCR 串行污染")
+    }
+    if (conflictingActions) {
+      noteParts.push("同一行包含冲突动作关键词，需要人工确认")
+    }
+
+    const quality: ParseQuality = !cardNames.length
+      ? "ambiguous"
+      : suspiciousPlayer || conflictingActions || !hasPlayerName(playerName)
+        ? "ambiguous"
+        : "strict"
+
     return applyDeckSupport(
       withQuality(
         {
           ...base,
-          playerName: gainKnownMatch.groups.player,
+          playerName,
           action: "gainKnown",
-          cardName: detail.cardName,
+          cardName: cardNames[0] ?? detail.cardName,
+          cardNames,
           suit: detail.suit,
           rank: detail.rank,
           confidence,
           source,
           status: "pending",
-          note: detail.cardName ? "公开日志显示从摸牌堆获得具名牌" : detail.note
+          note: noteParts.filter(Boolean).join("；") || undefined
         },
-        detail.cardName && hasPlayerName(gainKnownMatch.groups.player) ? "strict" : "ambiguous"
+        quality,
+        quality === "strict"
       ),
       deckProfile
     )

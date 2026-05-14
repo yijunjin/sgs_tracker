@@ -1,5 +1,13 @@
 import { KNOWN_CARD_NAMES, isKnownCardName } from "./cards"
-import type { CardName, DeckProfile } from "./types"
+import type { CardName, DeckProfile, OcrAliasEntry } from "./types"
+
+export type NormalizeResult = {
+  text: string
+  appliedAliases: Array<{
+    alias: string
+    canonical: CardName
+  }>
+}
 
 const textAliasMap = new Map<string, string>([
   ["无解可击", "无懈可击"],
@@ -17,6 +25,8 @@ const textAliasMap = new Map<string, string>([
   ["水淹七车", "水淹七军"]
 ])
 
+const cardAliasMap = new Map<string, string>([["挑", "桃"]])
+
 const suitAliasMap = new Map<string, string>([
   ["黑桃", "黑桃"],
   ["红桃", "红桃"],
@@ -33,8 +43,39 @@ function toHalfWidth(input: string): string {
     .replace(/\u3000/g, " ")
 }
 
-export function normalizeText(input: string): string {
-  const compact = toHalfWidth(input)
+function createBuiltInAliasEntries(): OcrAliasEntry[] {
+  const now = 0
+  const entries = [...textAliasMap.entries(), ...cardAliasMap.entries()]
+  return entries.map(([alias, canonical]) => ({
+    id: `built-in-${alias}-${canonical}`,
+    alias,
+    canonical,
+    source: "builtIn",
+    confidence: 1,
+    enabled: true,
+    hitCount: 0,
+    createdAt: now
+  }))
+}
+
+export const builtInOcrAliases: OcrAliasEntry[] = createBuiltInAliasEntries()
+
+let runtimeOcrAliases: OcrAliasEntry[] = []
+
+export function setRuntimeOcrAliases(aliases: OcrAliasEntry[]): void {
+  runtimeOcrAliases = aliases.filter((alias) => alias.source !== "builtIn")
+}
+
+export function loadOcrAliases(): OcrAliasEntry[] {
+  const merged = new Map<string, OcrAliasEntry>()
+  for (const alias of [...builtInOcrAliases, ...runtimeOcrAliases]) {
+    merged.set(alias.id, alias)
+  }
+  return [...merged.values()]
+}
+
+function basicNormalizeText(input: string): string {
+  return toHalfWidth(input)
     .replace(/[“”‘’"'`]/g, "")
     .replace(/[{}<>《》]/g, "")
     .replace(/[【\[]\s*/g, "【")
@@ -45,19 +86,63 @@ export function normalizeText(input: string): string {
     .replace(/[，,。.!！?？:：;；]/g, "")
     .replace(/\s+/g, "")
     .trim()
+}
 
-  let normalized = compact
-  for (const [from, to] of textAliasMap.entries()) {
-    normalized = normalized.replaceAll(from, to)
+export function applyOcrAliases(text: string, aliases: OcrAliasEntry[] = loadOcrAliases()): NormalizeResult {
+  let normalizedText = text
+  const appliedAliases: NormalizeResult["appliedAliases"] = []
+  const enabledAliases = aliases
+    .filter((alias) => alias.enabled && alias.alias && alias.canonical)
+    .sort((left, right) => right.alias.length - left.alias.length)
+
+  for (const alias of enabledAliases) {
+    if (!normalizedText.includes(alias.alias)) {
+      continue
+    }
+
+    normalizedText = normalizedText.replaceAll(alias.alias, alias.canonical)
+    appliedAliases.push({
+      alias: alias.alias,
+      canonical: alias.canonical
+    })
   }
 
-  return normalized
+  return {
+    text: normalizedText,
+    appliedAliases
+  }
+}
+
+export function normalizeTextWithAliases(input: string, aliases: OcrAliasEntry[] = loadOcrAliases()): NormalizeResult {
+  return applyOcrAliases(basicNormalizeText(input), aliases)
+}
+
+export function normalizeText(input: string): string {
+  return normalizeTextWithAliases(input).text
 }
 
 export function normalizeCardName(input: string): CardName | undefined {
   const normalized = normalizeText(input)
   if (isKnownCardName(normalized)) {
     return normalized
+  }
+
+  for (const [from, to] of cardAliasMap.entries()) {
+    if (!normalized.includes(from)) {
+      continue
+    }
+
+    const corrected = normalized.replaceAll(from, to)
+    if (isKnownCardName(corrected)) {
+      return corrected
+    }
+
+    const correctedMatch = [...KNOWN_CARD_NAMES]
+      .sort((left, right) => right.length - left.length)
+      .find((cardName) => corrected.includes(cardName))
+    if (correctedMatch) {
+      return correctedMatch
+    }
   }
 
   for (const candidate of [...textAliasMap.values(), ...textAliasMap.keys()]) {
@@ -93,7 +178,27 @@ export function findCardNameByLongestMatch(
 
 export function findKnownCardNameByLongestMatch(text: string): CardName | undefined {
   const normalized = normalizeText(text)
-  return [...KNOWN_CARD_NAMES]
+  const directMatch = [...KNOWN_CARD_NAMES]
     .sort((left, right) => right.length - left.length)
     .find((cardName) => normalized.includes(cardName))
+
+  if (directMatch) {
+    return directMatch
+  }
+
+  for (const [from, to] of cardAliasMap.entries()) {
+    if (!normalized.includes(from)) {
+      continue
+    }
+
+    const corrected = normalized.replaceAll(from, to)
+    const correctedMatch = [...KNOWN_CARD_NAMES]
+      .sort((left, right) => right.length - left.length)
+      .find((cardName) => corrected.includes(cardName))
+    if (correctedMatch) {
+      return correctedMatch
+    }
+  }
+
+  return undefined
 }

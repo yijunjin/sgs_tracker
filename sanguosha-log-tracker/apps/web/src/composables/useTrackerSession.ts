@@ -9,12 +9,17 @@ import {
   dismissReshuffleAlert,
   rejectEvent,
   setManualDeckRemaining,
+  setRuntimeOcrAliases,
   undoEvent,
   undoLastEvent,
   updateDeckRemainingState,
   type DeckProfile,
+  type OcrLine,
+  type OcrLogRecord,
   type ParsedLogEvent,
-  type TrackerState
+  type SessionReport,
+  type TrackerState,
+  type UserCorrectionRecord
 } from "@slt/shared"
 
 import { apiClient } from "../services/apiClient"
@@ -29,6 +34,8 @@ export function useTrackerSession() {
   const deckProfile = ref<DeckProfile>(defaultDeckProfile)
   const trackerState = ref<TrackerState>(createInitialTrackerState(defaultDeckProfile))
   const statusMessage = ref("正在检查 API 状态...")
+  const lastSessionReport = ref<SessionReport | null>(null)
+  const lastAliasCandidateCount = ref(0)
 
   function setLocalState(nextDeckProfile: DeckProfile): void {
     deckProfile.value = nextDeckProfile
@@ -44,6 +51,8 @@ export function useTrackerSession() {
       apiStatus.value = "online"
       runtimeMode.value = "remote"
       deckProfile.value = await apiClient.getDemoDeckProfile()
+      const aliases = await apiClient.getAliases()
+      setRuntimeOcrAliases(aliases)
       const session = await apiClient.createSession()
       sessionId.value = session.sessionId
       trackerState.value = session.state
@@ -69,6 +78,23 @@ export function useTrackerSession() {
   async function ingestParsedEvents(events: ParsedLogEvent[]): Promise<void> {
     for (const event of events) {
       await syncEvent(event)
+    }
+  }
+
+  async function recordOcrBatch(input: {
+    rawLines?: OcrLine[] | string[]
+    mergedLines?: OcrLine[] | string[]
+    source?: OcrLogRecord["source"]
+    ocrEngine?: string
+  }): Promise<void> {
+    if (runtimeMode.value !== "remote" || !sessionId.value) {
+      return
+    }
+
+    try {
+      await apiClient.recordOcrBatch(sessionId.value, input)
+    } catch (error) {
+      statusMessage.value = error instanceof Error ? `OCR 批次记录失败：${error.message}` : "OCR 批次记录失败。"
     }
   }
 
@@ -146,6 +172,46 @@ export function useTrackerSession() {
     trackerState.value = createInitialTrackerState(deckProfile.value)
   }
 
+  async function endCurrentSession(): Promise<void> {
+    if (runtimeMode.value !== "remote" || !sessionId.value) {
+      statusMessage.value = "本地模式无法写入报告；请连接 API 后生成对局报告。"
+      return
+    }
+
+    const result = await apiClient.endSession(sessionId.value)
+    lastSessionReport.value = result.report
+    lastAliasCandidateCount.value = result.candidateCount
+    statusMessage.value = result.error
+      ? `报告生成失败：${result.error}`
+      : `已结束本局并生成报告，新增候选别名 ${result.candidateCount} 个。`
+  }
+
+  async function endAndCreateSession(): Promise<void> {
+    if (runtimeMode.value === "remote" && sessionId.value) {
+      await endCurrentSession()
+      const next = await apiClient.createSession()
+      sessionId.value = next.sessionId
+      trackerState.value = next.state
+      statusMessage.value = "上一局已结束并分析，已创建新会话。"
+      return
+    }
+
+    trackerState.value = createInitialTrackerState(deckProfile.value)
+  }
+
+  async function recordCorrection(input: {
+    eventId: string
+    correctedCardName?: string
+    reason?: UserCorrectionRecord["reason"]
+  }): Promise<void> {
+    if (runtimeMode.value === "remote" && sessionId.value) {
+      trackerState.value = await apiClient.recordCorrection(sessionId.value, input)
+      return
+    }
+
+    trackerState.value = rejectEvent(trackerState.value, input.eventId)
+  }
+
   function updateDeckRemaining(stableRemaining: number | undefined, rawText?: string): void {
     trackerState.value = updateDeckRemainingState(trackerState.value, stableRemaining, rawText)
   }
@@ -190,10 +256,13 @@ export function useTrackerSession() {
     deckProfile,
     deckProfiles,
     trackerState,
+    lastSessionReport,
+    lastAliasCandidateCount,
     statusMessage,
     parsedEvents: computed(() => [...trackerState.value.events].reverse()),
     init,
     ingestParsedEvents,
+    recordOcrBatch,
     updateEventStatus,
     acceptAllHighConfidence: acceptAllStrictEvents,
     acceptAllStrictEvents,
@@ -203,6 +272,9 @@ export function useTrackerSession() {
     dismissPendingReshuffle,
     markManualReshuffle,
     correctDeckRemaining,
+    endCurrentSession,
+    endAndCreateSession,
+    recordCorrection,
     undo,
     undoOne,
     reset

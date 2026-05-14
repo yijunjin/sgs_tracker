@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { oneVOneDeckProfile } from "../src/cards"
+import { happyTwoVTwoDeckProfile, oneVOneDeckProfile } from "../src/cards"
 import { mergeBrokenOcrLines, parseLogInput } from "../src/parser"
 
 describe("parseLogInput", () => {
@@ -49,6 +49,57 @@ describe("parseLogInput", () => {
       playerName: "郭嘉（您）",
       cardName: "过河拆桥",
       quality: "strict"
+    })
+  })
+
+  it("keeps clean self draw pile gain strict", () => {
+    const [event] = parseLogInput("界孙坚（您）从摸牌堆获得闪电", "manual", happyTwoVTwoDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "gainKnown",
+      playerName: "界孙坚（您）",
+      canonicalPlayerKey: "__self__",
+      cardName: "闪电",
+      quality: "strict",
+      autoAcceptable: true
+    })
+  })
+
+  it("downgrades suspicious draw pile gain to ambiguous", () => {
+    const [event] = parseLogInput("流马5英魂奔雷木牛流马界孙坚（您）从摸牌堆获得闪电", "manual", happyTwoVTwoDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "gainKnown",
+      cardName: "闪电",
+      quality: "ambiguous",
+      autoAcceptable: false,
+      suspiciousPlayerName: true
+    })
+    expect(event.note).toContain("玩家名区域异常")
+  })
+
+  it("parses public known gain from 五谷丰登", () => {
+    const [event] = parseLogInput("公孙現（您）从五谷丰登获得桃", "manual", happyTwoVTwoDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "gainKnown",
+      playerName: "公孙現（您）",
+      canonicalPlayerKey: "__self__",
+      cardName: "桃",
+      quality: "strict",
+      autoAcceptable: true,
+      note: "公开日志显示从五谷丰登获得具名牌"
+    })
+  })
+
+  it("maps 挑 to 桃 in public known gain logs", () => {
+    const [event] = parseLogInput("公孙環（您）从五谷丰登获得挑", "manual", happyTwoVTwoDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "gainKnown",
+      cardName: "桃",
+      quality: "strict",
+      autoAcceptable: true
     })
   })
 

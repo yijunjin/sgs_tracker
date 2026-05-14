@@ -36,6 +36,15 @@ export interface OcrLine {
   box?: unknown
 }
 
+export type OcrLogRecord = {
+  id: string
+  text: string
+  score?: number | undefined
+  box?: unknown
+  source: "ocr" | "manual" | "mock"
+  createdAt: number
+}
+
 export type DeckCardEntry = {
   name: CardName
   count: number
@@ -59,8 +68,12 @@ export interface ParsedLogEvent {
   normalizedRawText: string
   playerName?: string | undefined
   targetName?: string | undefined
+  canonicalPlayerKey?: string | undefined
+  canonicalTargetKey?: string | undefined
+  suspiciousPlayerName?: boolean | undefined
   action: CardEventAction
   cardName?: CardName | undefined
+  cardNames?: CardName[] | undefined
   suit?: string | undefined
   rank?: string | undefined
   confidence: number
@@ -69,10 +82,15 @@ export interface ParsedLogEvent {
   quality: ParseQuality
   autoAcceptable: boolean
   impactCount?: 0 | 1 | undefined
+  consumedKnownCard?: boolean | undefined
   cycleId?: number | undefined
   duplicate?: boolean | undefined
   supportStatus?: CardSupportStatus | undefined
   note?: string | undefined
+  appliedAliases?: Array<{
+    alias: string
+    canonical: CardName
+  }> | undefined
   fingerprint: string
   createdAt: string
 }
@@ -146,4 +164,77 @@ export type TrackerWarning = {
   message: string
   cardName?: CardName | undefined
   eventId?: string | undefined
+}
+
+export type OcrAliasEntry = {
+  id: string
+  alias: string
+  canonical: CardName
+  source: "builtIn" | "manual" | "mined"
+  confidence: number
+  enabled: boolean
+  hitCount: number
+  createdAt: number
+  updatedAt?: number | undefined
+  note?: string | undefined
+}
+
+export type OcrAliasCandidate = {
+  id: string
+  alias: string
+  suggestedCanonical: CardName
+  confidence: number
+  count: number
+  sources: Array<"unknownEvent" | "ambiguousEvent" | "userCorrection" | "fuzzyMatch" | "overLimitEvent">
+  examples: Array<{
+    sessionId: string
+    rawText: string
+    normalizedText?: string | undefined
+    eventId?: string | undefined
+  }>
+  status: "pending" | "accepted" | "rejected"
+  createdAt: number
+  updatedAt?: number | undefined
+}
+
+export type SessionExportStatus = "pending" | "exported" | "aliasAnalyzed" | "failed"
+
+export type UserCorrectionRecord = {
+  id: string
+  sessionId: string
+  eventId: string
+  rawText: string
+  previousCardName?: CardName | undefined
+  correctedCardName?: CardName | undefined
+  reason: "misrecognized" | "wrongCard" | "wrongAction" | "duplicate" | "unsupported"
+  createdAt: number
+}
+
+export type SessionReport = {
+  sessionId: string
+  deckProfileId: string
+  startedAt: number
+  endedAt?: number | undefined
+  ocrEngine: string
+  aliasDictionaryVersion?: string | undefined
+
+  rawOcrLines: OcrLogRecord[]
+  mergedLines: OcrLogRecord[]
+  parsedEvents: ParsedLogEvent[]
+  acceptedEvents: ParsedLogEvent[]
+  ignoredEvents: ParsedLogEvent[]
+  ambiguousEvents: ParsedLogEvent[]
+  unsupportedEvents: ParsedLogEvent[]
+  userCorrections: UserCorrectionRecord[]
+
+  summary: {
+    rawLineCount: number
+    mergedLineCount: number
+    parsedEventCount: number
+    acceptedCount: number
+    ignoredCount: number
+    ambiguousCount: number
+    unsupportedCount: number
+    correctionCount: number
+  }
 }

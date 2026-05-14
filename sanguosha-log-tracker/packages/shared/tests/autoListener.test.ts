@@ -7,7 +7,7 @@ import {
   enterMidGameMode,
   processAutoListenBatch
 } from "../src/autoListen"
-import { oneVOneDeckProfile } from "../src/cards"
+import { happyTwoVTwoDeckProfile, oneVOneDeckProfile } from "../src/cards"
 import { createGameStartSignature } from "../src/startSignal"
 import { applyEvent, createInitialTrackerState } from "../src/tracker"
 import type { TrackerState } from "../src/types"
@@ -113,6 +113,60 @@ describe("auto listener state machine", () => {
     })
 
     expect(result.events[0]).toMatchObject({ quality: "ambiguous", status: "pending" })
+  })
+
+  it("keeps strict over-limit events pending instead of auto accepting", () => {
+    let trackerState = createInitialTrackerState(happyTwoVTwoDeckProfile)
+    trackerState = applyEvent(trackerState, {
+      id: "lightning-1",
+      rawText: "界孙坚（您）使用闪电",
+      normalizedText: "界孙坚（您）使用闪电",
+      normalizedRawText: "界孙坚（您）使用闪电",
+      playerName: "界孙坚（您）",
+      canonicalPlayerKey: "__self__",
+      action: "use",
+      cardName: "闪电",
+      confidence: 1,
+      source: "manual",
+      status: "accepted",
+      quality: "strict",
+      autoAcceptable: true,
+      fingerprint: "a",
+      createdAt: new Date().toISOString()
+    })
+    trackerState = applyEvent(trackerState, {
+      id: "lightning-2",
+      rawText: "郭嘉使用闪电",
+      normalizedText: "郭嘉使用闪电",
+      normalizedRawText: "郭嘉使用闪电",
+      playerName: "郭嘉",
+      action: "use",
+      cardName: "闪电",
+      confidence: 1,
+      source: "manual",
+      status: "accepted",
+      quality: "strict",
+      autoAcceptable: true,
+      fingerprint: "b",
+      createdAt: new Date().toISOString()
+    })
+
+    const result = processAutoListenBatch({
+      state: {
+        ...createAutoGameSessionState(),
+        mode: "inGame",
+        hasEnteredInGame: true,
+        startMode: "newGame",
+        baselineStatus: "complete"
+      },
+      lines: [{ text: "黄月英使用闪电", score: 0.99 }],
+      deckProfile: happyTwoVTwoDeckProfile,
+      trackerState,
+      now: 2
+    })
+
+    expect(result.events[0]).toMatchObject({ quality: "strict", status: "pending", autoAcceptable: false })
+    expect(result.events[0]?.note).toContain("超过牌库总数")
   })
 
   it("primes the first OCR batch in mid-game mode without updating deck", () => {

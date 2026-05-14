@@ -23,6 +23,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# API runtime data: OCR session reports, mined aliases, local user aliases.
+sanguosha-log-tracker/apps/api/data/
+
 # Editor and OS noise
 .vscode/
 .idea/

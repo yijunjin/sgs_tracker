@@ -43,7 +43,7 @@ const actionLabelMap: Record<ParsedLogEvent["action"], string> = {
       </div>
     </div>
 
-    <div class="mt-4 space-y-3 min-h-[200px] overflow-y-auto">
+    <div class="mt-4 space-y-3 max-h-[600px] overflow-y-auto">
       <article
         v-for="event in recentEvents"
         :key="`${event.id}-${event.createdAt}`"
