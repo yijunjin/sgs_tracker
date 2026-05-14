@@ -291,6 +291,38 @@ function canManageAlias(alias: OcrAliasEntry): boolean {
   return alias.source !== "builtIn"
 }
 
+function mergeAnalyzedExamples(
+  items: OcrAliasCandidate["examples"],
+  storedItems: OcrAliasCandidate["examples"]
+): OcrAliasCandidate["examples"] {
+  return items.map((item) => {
+    if (item.evidenceImage) {
+      return item
+    }
+
+    const stored = storedItems.find((candidateExample) => {
+      if (item.eventId && candidateExample.eventId) {
+        return item.sessionId === candidateExample.sessionId && item.eventId === candidateExample.eventId
+      }
+
+      return (
+        item.sessionId === candidateExample.sessionId &&
+        item.rawText === candidateExample.rawText &&
+        item.normalizedText === candidateExample.normalizedText
+      )
+    })
+
+    if (!stored?.evidenceImage) {
+      return item
+    }
+
+    return {
+      ...item,
+      evidenceImage: stored.evidenceImage
+    }
+  })
+}
+
 function mergeAnalyzedCandidates(items: OcrAliasCandidate[]): OcrAliasCandidate[] {
   const storedById = new Map(candidates.value.map((candidate) => [candidate.id, candidate]))
   return sortCandidates(
@@ -301,6 +333,7 @@ function mergeAnalyzedCandidates(items: OcrAliasCandidate[]): OcrAliasCandidate[
       }
       return {
         ...candidate,
+        examples: mergeAnalyzedExamples(candidate.examples, stored.examples),
         status: stored.status,
         updatedAt: stored.updatedAt
       }

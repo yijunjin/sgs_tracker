@@ -76,8 +76,11 @@ export class AliasService {
     const mined = analyzeOcrAliasesForReport(report, deckProfile, aliases).map((candidate) => this.normalizeCandidate(candidate))
     const existing = await this.getCandidates()
     const merged = this.mergeCandidates(existing, mined)
-    await this.saveCandidates(merged)
-    return mined
+    const hydrated = await this.hydrateCandidateEvidence(merged)
+    await this.saveCandidates(hydrated.candidates)
+
+    const minedIds = new Set(mined.map((candidate) => candidate.id))
+    return hydrated.candidates.filter((candidate) => minedIds.has(candidate.id))
   }
 
   async acceptCandidate(id: string): Promise<{ candidate: OcrAliasCandidate; alias: OcrAliasEntry }> {
