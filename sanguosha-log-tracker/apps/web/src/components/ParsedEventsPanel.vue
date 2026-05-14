@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { CheckCheck, ListChecks } from "lucide-vue-next"
 import type { ParsedLogEvent } from "@slt/shared"
 
 defineProps<{
@@ -57,13 +58,14 @@ function canAccept(event: ParsedLogEvent): boolean {
 </script>
 
 <template>
-  <section class="glass-panel rounded-3xl p-5">
+  <section class="glass-panel p-4">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
-        <h2 class="section-title">解析出的事件</h2>
-        <p class="mt-1 text-sm muted">解析结果先进入 pending，确认后才会更新牌库。</p>
+        <h2 class="section-title section-title-row"><ListChecks class="section-title-icon" />待确认事件</h2>
+        <p class="mt-1 text-xs muted">解析结果先进入 pending，确认后才会更新牌库。</p>
       </div>
       <button class="action-button" type="button" @click="emit('accept-high-confidence')">
+        <CheckCheck class="button-icon" />
         全部接受严格有效事件
       </button>
     </div>

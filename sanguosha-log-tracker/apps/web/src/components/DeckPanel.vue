@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue"
+import { Boxes, CheckCircle2, RotateCcw } from "lucide-vue-next"
 import { getDeckTotalCount, type CardName, type DeckProfile, type TrackerState } from "@slt/shared"
 import UiTag from "./ui/UiTag.vue"
 
@@ -102,13 +103,13 @@ function submitManualRemaining(): void {
   <section class="glass-panel p-4">
     <div class="flex items-start justify-between gap-4">
       <div>
-        <h2 class="section-title">牌库统计</h2>
+        <h2 class="section-title section-title-row"><Boxes class="section-title-icon" />牌库统计</h2>
         <p class="mt-1 text-xs muted">{{ deckProfile.description }}</p>
       </div>
       <UiTag variant="gold">共 {{ cardNameCount }} 类牌</UiTag>
     </div>
 
-    <div class="mt-4 rounded-lg border border-slate-800/80 bg-slate-950/45 p-4">
+    <div class="mt-3 rounded-lg border border-slate-800/80 bg-slate-950/45 p-3">
       <div class="grid gap-3 text-sm md:grid-cols-4">
         <div><p class="metric-label">当前牌堆</p><p class="metric-value gold-text">{{ deckProfile.name }}</p></div>
         <div><p class="metric-label">官方剩余牌 OCR</p><p class="metric-value">{{ trackerState.lastDeckRemainingRawText || "暂无" }}</p></div>
@@ -124,32 +125,35 @@ function submitManualRemaining(): void {
         <p class="font-semibold">疑似洗牌：{{ trackerState.pendingReshuffleAlert.previousRemaining }} → {{ trackerState.pendingReshuffleAlert.currentRemaining }}</p>
         <p class="mt-1 text-xs">{{ trackerState.pendingReshuffleAlert.reason }}</p>
         <div class="mt-3 flex flex-wrap gap-2">
-          <button class="action-button" type="button" @click="emit('confirm-reshuffle')">确认已洗牌</button>
+          <button class="action-button" type="button" @click="emit('confirm-reshuffle')"><CheckCircle2 class="button-icon" />确认已洗牌</button>
           <button class="action-button secondary-button" type="button" @click="emit('dismiss-reshuffle')">忽略本次提示</button>
         </div>
       </div>
 
-      <div class="mt-4 flex flex-wrap gap-2">
-        <button class="action-button secondary-button" type="button" @click="emit('manual-reshuffle')">手动标记洗牌</button>
-        <input v-model.number="manualRemaining" class="input-shell w-28" type="number" min="0" :max="totalCards" placeholder="剩余" />
-        <button class="action-button secondary-button" type="button" @click="submitManualRemaining">手动修正剩余牌数</button>
-      </div>
+      <details class="compact-details mt-3">
+        <summary>牌库操作</summary>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <button class="action-button secondary-button" type="button" @click="emit('manual-reshuffle')"><RotateCcw class="button-icon" />手动标记洗牌</button>
+          <input v-model.number="manualRemaining" class="input-shell w-28" type="number" min="0" :max="totalCards" placeholder="剩余" />
+          <button class="action-button secondary-button" type="button" @click="submitManualRemaining">手动修正剩余牌数</button>
+        </div>
 
-      <label class="mt-4 block text-sm">
-        <span class="mb-2 block text-slate-300">牌库模式选择</span>
-        <select
-          class="input-shell w-full"
-          :value="deckProfile.id"
-          @change="emit('change-deck', ($event.target as HTMLSelectElement).value)"
-        >
-          <option v-for="profile in deckProfiles" :key="profile.id" :value="profile.id">
-            {{ profile.name }}
-          </option>
-        </select>
-      </label>
+        <label class="mt-3 block text-sm">
+          <span class="mb-2 block text-slate-300">牌库模式选择</span>
+          <select
+            class="input-shell w-full"
+            :value="deckProfile.id"
+            @change="emit('change-deck', ($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="profile in deckProfiles" :key="profile.id" :value="profile.id">
+              {{ profile.name }}
+            </option>
+          </select>
+        </label>
+      </details>
     </div>
 
-    <div class="mt-4 flex flex-wrap gap-2">
+    <div class="mt-3 flex flex-wrap gap-2">
       <UiTag
         v-for="item in filterOptions"
         :key="item.value"
@@ -162,7 +166,7 @@ function submitManualRemaining(): void {
       </UiTag>
     </div>
 
-    <div class="mt-4 max-h-[520px] overflow-auto rounded-lg border border-slate-800/70">
+    <div class="mt-3 max-h-[280px] overflow-auto rounded-lg border border-slate-800/70">
       <table class="data-table">
         <thead>
           <tr>

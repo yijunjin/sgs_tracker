@@ -1,5 +1,20 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue"
+import {
+  Ban,
+  BookOpenCheck,
+  Check,
+  ClipboardList,
+  Database,
+  FileJson,
+  FileText,
+  GitCompareArrows,
+  Plus,
+  RefreshCw,
+  Search,
+  Trash2,
+  X
+} from "lucide-vue-next"
 import { cardNames, setRuntimeOcrAliases, type OcrAliasCandidate, type OcrAliasEntry } from "@slt/shared"
 
 import { apiClient } from "../services/apiClient"
@@ -73,6 +88,17 @@ function aliasSourceLabel(source: OcrAliasEntry["source"]): string {
   return labels[source]
 }
 
+function candidateSourcesLabel(sources: OcrAliasCandidate["sources"]): string {
+  const labels: Record<OcrAliasCandidate["sources"][number], string> = {
+    unknownEvent: "未知事件",
+    ambiguousEvent: "模糊事件",
+    userCorrection: "用户修正",
+    fuzzyMatch: "模糊匹配",
+    overLimitEvent: "超限事件"
+  }
+  return sources.map((source) => labels[source]).join("、")
+}
+
 async function refresh(): Promise<void> {
   try {
     const [nextSessions, nextCandidates, nextAliases] = await Promise.all([
@@ -142,28 +168,31 @@ onMounted(() => {
 
 <template>
   <div class="space-y-3">
-    <section class="glass-panel p-4">
-      <div class="flex flex-wrap items-center justify-between gap-4">
+    <section class="glass-panel alias-summary-bar p-3">
+      <div class="flex flex-wrap items-center gap-4">
         <div>
-          <h2 class="section-title">学习结果概览</h2>
+          <h2 class="section-title section-title-row"><BookOpenCheck class="section-title-icon" />学习结果概览</h2>
           <p v-if="message" class="mt-1 text-xs text-amber-200">{{ message }}</p>
         </div>
-        <button class="action-button secondary-button" type="button" @click="refresh">刷新</button>
-      </div>
-      <div class="mt-3 grid gap-3 md:grid-cols-6">
-        <div class="metric-card"><p class="metric-label">对局数</p><p class="metric-value">{{ sessions.length }}</p></div>
-        <div class="metric-card"><p class="metric-label">生成候选</p><p class="metric-value">{{ candidates.length }}</p></div>
-        <div class="metric-card"><p class="metric-label">当前字典条目</p><p class="metric-value">{{ aliases.length }}</p></div>
-        <div class="metric-card"><p class="metric-label">今日新增</p><p class="metric-value">{{ todayCandidateCount }}</p></div>
-        <div class="metric-card"><p class="metric-label">生效中</p><p class="metric-value">{{ activeAliasCount }}</p></div>
-        <div class="metric-card"><p class="metric-label">待审核</p><p class="metric-value gold-text">{{ pendingCount }}</p></div>
+        <div class="alias-summary-metrics">
+          <div class="summary-metric"><span>对局数</span><strong>{{ sessions.length }}</strong></div>
+          <div class="summary-metric"><span>生成候选</span><strong>{{ candidates.length }}</strong></div>
+          <div class="summary-metric"><span>当前字典条目</span><strong>{{ aliases.length }}</strong></div>
+          <div class="summary-metric"><span>今日新增</span><strong>{{ todayCandidateCount }}</strong></div>
+          <div class="summary-metric"><span>生效中</span><strong>{{ activeAliasCount }}</strong></div>
+          <div class="summary-metric"><span>待审核</span><strong class="gold-text">{{ pendingCount }}</strong></div>
+        </div>
+        <button class="action-button secondary-button ml-auto" type="button" @click="refresh">
+          <RefreshCw class="button-icon" />
+          刷新
+        </button>
       </div>
     </section>
 
     <div class="grid gap-3 xl:grid-cols-[1fr_1fr]">
       <section class="glass-panel min-w-0 p-4">
         <div class="mb-3 flex items-center justify-between gap-3">
-          <h2 class="section-title">最近对局报告</h2>
+          <h2 class="section-title section-title-row"><ClipboardList class="section-title-icon" />最近对局报告</h2>
         </div>
         <div class="overflow-x-auto rounded-lg border border-slate-800/70">
           <table class="data-table">
@@ -190,9 +219,12 @@ onMounted(() => {
                 <td>{{ session.summary.correctionCount }}</td>
                 <td>
                   <div class="flex gap-2">
-                    <a class="action-button secondary-button" :href="apiClient.exportTextUrl(session.sessionId)">TXT</a>
-                    <a class="action-button secondary-button" :href="apiClient.exportJsonUrl(session.sessionId)">JSON</a>
-                    <button class="action-button secondary-button" type="button" @click="analyzeSession(session.sessionId)">重新分析</button>
+                    <a class="action-button secondary-button compact-action" :href="apiClient.exportTextUrl(session.sessionId)"><FileText class="button-icon" />TXT</a>
+                    <a class="action-button secondary-button compact-action" :href="apiClient.exportJsonUrl(session.sessionId)"><FileJson class="button-icon" />JSON</a>
+                    <button class="action-button secondary-button compact-action" type="button" @click="analyzeSession(session.sessionId)">
+                      <RefreshCw class="button-icon" />
+                      重新分析
+                    </button>
                   </div>
                 </td>
               </tr>
@@ -211,11 +243,11 @@ onMounted(() => {
 
       <section class="glass-panel min-w-0 p-4">
         <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 class="section-title">候选别名</h2>
+          <h2 class="section-title section-title-row"><GitCompareArrows class="section-title-icon" />候选别名</h2>
           <div class="flex gap-2">
-            <UiTag variant="warning">待审核 {{ pendingCount }}</UiTag>
-            <UiTag variant="success">已接受 {{ acceptedCount }}</UiTag>
-            <UiTag variant="danger">已拒绝 {{ rejectedCount }}</UiTag>
+            <UiTag variant="warning" :icon="Search">待审核 {{ pendingCount }}</UiTag>
+            <UiTag variant="success" :icon="Check">已接受 {{ acceptedCount }}</UiTag>
+            <UiTag variant="danger" :icon="X">已拒绝 {{ rejectedCount }}</UiTag>
           </div>
         </div>
         <div class="overflow-x-auto rounded-lg border border-slate-800/70">
@@ -242,12 +274,18 @@ onMounted(() => {
                 <td>{{ candidate.suggestedCanonical }}</td>
                 <td>{{ candidate.count }}</td>
                 <td><span class="confidence-pill">{{ candidate.confidence.toFixed(2) }}</span></td>
-                <td>{{ candidate.sources.join(", ") }}</td>
+                <td>{{ candidateSourcesLabel(candidate.sources) }}</td>
                 <td><UiTag :variant="candidateStatusVariant(candidate.status)" dot>{{ candidateStatusLabel(candidate.status) }}</UiTag></td>
                 <td>
                   <div class="flex gap-2">
-                    <button class="action-button secondary-button" type="button" :disabled="candidate.status !== 'pending'" @click.stop="acceptCandidate(candidate.id)">接受</button>
-                    <button class="action-button danger-button" type="button" :disabled="candidate.status !== 'pending'" @click.stop="rejectCandidate(candidate.id)">拒绝</button>
+                    <button class="action-button secondary-button compact-action" type="button" :disabled="candidate.status !== 'pending'" @click.stop="acceptCandidate(candidate.id)">
+                      <Check class="button-icon" />
+                      接受
+                    </button>
+                    <button class="action-button danger-button compact-action" type="button" :disabled="candidate.status !== 'pending'" @click.stop="rejectCandidate(candidate.id)">
+                      <X class="button-icon" />
+                      拒绝
+                    </button>
                   </div>
                 </td>
               </tr>
@@ -267,7 +305,7 @@ onMounted(() => {
 
     <div class="grid gap-3 xl:grid-cols-[0.9fr_1.9fr]">
       <section class="glass-panel min-w-0 p-4">
-        <h2 class="section-title">上下文预览</h2>
+        <h2 class="section-title section-title-row"><Search class="section-title-icon" />上下文预览</h2>
         <div class="mt-3 rounded-lg border border-slate-800/70 bg-slate-950/45 p-4 text-sm text-slate-300">
           <template v-if="selectedCandidate">
             <p class="font-semibold text-slate-100">
@@ -285,13 +323,16 @@ onMounted(() => {
 
       <section class="glass-panel min-w-0 p-4">
         <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <h2 class="section-title">当前别名字典</h2>
+          <h2 class="section-title section-title-row"><Database class="section-title-icon" />当前别名字典</h2>
           <div class="flex flex-1 flex-wrap justify-end gap-2">
             <input v-model="newAlias" class="input-shell min-w-48" placeholder="别名" />
             <select v-model="newCanonical" class="input-shell min-w-40">
               <option v-for="name in cardNames" :key="name" :value="name">{{ name }}</option>
             </select>
-            <button class="action-button" type="button" @click="addAlias">+ 添加别名</button>
+            <button class="action-button" type="button" @click="addAlias">
+              <Plus class="button-icon" />
+              添加别名
+            </button>
           </div>
         </div>
         <div class="overflow-x-auto rounded-lg border border-slate-800/70">
@@ -317,8 +358,14 @@ onMounted(() => {
                 <td>{{ alias.note || "-" }}</td>
                 <td>
                   <div class="flex gap-2">
-                    <button class="action-button secondary-button" type="button" @click="toggleAlias(alias)">{{ alias.enabled ? "禁用" : "启用" }}</button>
-                    <button class="action-button danger-button" type="button" @click="deleteAlias(alias.id)">删除</button>
+                    <button class="action-button secondary-button compact-action" type="button" @click="toggleAlias(alias)">
+                      <component :is="alias.enabled ? Ban : Check" class="button-icon" />
+                      {{ alias.enabled ? "禁用" : "启用" }}
+                    </button>
+                    <button class="action-button danger-button compact-action" type="button" @click="deleteAlias(alias.id)">
+                      <Trash2 class="button-icon" />
+                      删除
+                    </button>
                   </div>
                 </td>
               </tr>

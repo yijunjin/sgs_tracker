@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { RotateCcw, Siren, Undo2 } from "lucide-vue-next"
 import type { ParsedLogEvent } from "@slt/shared"
 
 defineProps<{
@@ -27,38 +28,40 @@ const actionLabelMap: Record<ParsedLogEvent["action"], string> = {
 </script>
 
 <template>
-  <section class="glass-panel rounded-3xl p-5">
+  <section class="glass-panel p-4">
     <div class="flex items-start justify-between gap-4">
       <div>
-        <h2 class="section-title">最近事件</h2>
-        <p class="mt-1 text-sm muted">显示最近 20 条已接受事件，可直接撤销上一条。</p>
+        <h2 class="section-title section-title-row"><Siren class="section-title-icon" />最近事件</h2>
+        <p class="mt-1 text-xs muted">显示最近 20 条已接受事件，可直接撤销上一条。</p>
       </div>
       <div class="flex flex-wrap gap-2">
         <button class="action-button secondary-button" type="button" @click="emit('undo')">
+          <Undo2 class="button-icon" />
           撤销上一条
         </button>
         <button class="action-button danger-button" type="button" @click="emit('reset')">
+          <RotateCcw class="button-icon" />
           重置本局
         </button>
       </div>
     </div>
 
-    <div class="mt-4 space-y-3 max-h-[600px] overflow-y-auto">
+    <div class="mt-3 space-y-2 max-h-[250px] overflow-y-auto">
       <article
         v-for="event in recentEvents"
         :key="`${event.id}-${event.createdAt}`"
-        class="rounded-2xl border border-slate-800 bg-slate-950/60 p-4"
+        class="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2"
       >
-        <div class="flex items-center justify-between gap-3">
-          <div>
-            <h3 class="text-sm font-semibold text-slate-100">
+        <div class="grid items-center gap-3 md:grid-cols-[1fr_auto]">
+          <div class="min-w-0">
+            <h3 class="truncate text-sm font-semibold text-slate-100">
               第 {{ event.cycleId ?? "-" }} 轮 · {{ event.playerName || "未知玩家" }} · {{ actionLabelMap[event.action] }} · {{ event.cardName || "未识别牌名" }}
             </h3>
-            <p class="mt-1 text-xs text-slate-400">impact {{ event.impactCount ?? "-" }} · {{ event.note || event.rawText }}</p>
+            <p class="mt-1 truncate text-xs text-slate-400">impact {{ event.impactCount ?? "-" }} · {{ event.note || event.rawText }}</p>
           </div>
           <div class="flex flex-wrap justify-end gap-2">
-            <button class="action-button secondary-button" type="button" @click="emit('undo-event', event.id)">撤销此事件</button>
-            <button class="action-button danger-button" type="button" @click="emit('mark-misrecognized', event.id)">标记为误识别</button>
+            <button class="action-button secondary-button compact-action" type="button" @click="emit('undo-event', event.id)">撤销</button>
+            <button class="action-button danger-button compact-action" type="button" @click="emit('mark-misrecognized', event.id)">误识别</button>
           </div>
         </div>
       </article>

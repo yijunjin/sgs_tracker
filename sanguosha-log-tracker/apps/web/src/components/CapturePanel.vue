@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue"
+import { Camera, Crop, ImagePlus, RotateCcw, Scissors, SlidersHorizontal, Square, Upload } from "lucide-vue-next"
 import type { CropRect } from "../composables/useScreenCapture"
+import UiTag from "./ui/UiTag.vue"
 
 const props = defineProps<{
   stream: MediaStream | null
@@ -85,66 +87,70 @@ defineExpose({
 </script>
 
 <template>
-  <section class="glass-panel rounded-3xl p-5">
+  <section class="glass-panel p-4">
     <div class="flex items-start justify-between gap-4">
       <div>
-        <h2 class="section-title">日志截图来源</h2>
-        <p class="mt-1 text-sm muted">支持屏幕捕获、上传截图和示例日志三种来源。</p>
+        <h2 class="section-title section-title-row"><Camera class="section-title-icon" />采集与识别</h2>
+        <p class="mt-1 text-xs muted">支持屏幕捕获、上传截图和示例日志三种来源。</p>
       </div>
-      <span class="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-xs text-slate-300">
-        {{ sourceLabel }}
-      </span>
+      <UiTag variant="gold">{{ sourceLabel }}</UiTag>
     </div>
 
-    <div class="mt-4 grid gap-3 md:grid-cols-2">
+    <div class="mt-4 grid gap-2 md:grid-cols-3">
       <button class="action-button" type="button" @click="emit('start-capture')">
+        <Camera class="button-icon" />
         {{ captureLabel }}
       </button>
       <button class="action-button secondary-button" type="button" :disabled="!stream" @click="emit('stop-capture')">
+        <Square class="button-icon" />
         停止捕获
       </button>
       <button
-        class="action-button secondary-button md:col-span-2"
+        class="action-button secondary-button"
         type="button"
         :disabled="!stream"
         @click="emit('capture-frame', videoElement)"
       >
+        <Scissors class="button-icon" />
         截取当前画面
       </button>
-      <label class="input-shell flex cursor-pointer items-center justify-center md:col-span-2">
+      <label class="input-shell flex cursor-pointer items-center justify-center gap-2">
+        <Upload class="button-icon" />
         上传图片
         <input class="hidden" type="file" accept="image/*" @change="handleFileChange" />
       </label>
       <button class="action-button md:col-span-2" type="button" @click="emit('generate-sample')">
+        <ImagePlus class="button-icon" />
         生成示例日志截图
       </button>
     </div>
 
-    <div class="mt-4 overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/80">
-      <video ref="videoElement" class="h-56 w-full object-contain" autoplay muted playsinline />
+    <div class="mt-3 overflow-hidden rounded-lg border border-slate-800 bg-slate-950/80">
+      <video ref="videoElement" class="h-40 w-full object-contain" autoplay muted playsinline />
     </div>
 
-    <div class="mt-4 grid gap-3 sm:grid-cols-2">
+    <div class="mt-3 grid gap-2 sm:grid-cols-4">
       <label class="text-sm">
-        <span class="mb-2 block text-slate-300">裁剪 X</span>
+        <span class="mb-1 block text-xs text-slate-300">X</span>
         <input v-model.number="localCropRect.x" class="input-shell w-full" type="number" @input="emitCropUpdate" />
       </label>
       <label class="text-sm">
-        <span class="mb-2 block text-slate-300">裁剪 Y</span>
+        <span class="mb-1 block text-xs text-slate-300">Y</span>
         <input v-model.number="localCropRect.y" class="input-shell w-full" type="number" @input="emitCropUpdate" />
       </label>
       <label class="text-sm">
-        <span class="mb-2 block text-slate-300">裁剪宽度</span>
+        <span class="mb-1 block text-xs text-slate-300">宽度</span>
         <input v-model.number="localCropRect.width" class="input-shell w-full" type="number" @input="emitCropUpdate" />
       </label>
       <label class="text-sm">
-        <span class="mb-2 block text-slate-300">裁剪高度</span>
+        <span class="mb-1 block text-xs text-slate-300">高度</span>
         <input v-model.number="localCropRect.height" class="input-shell w-full" type="number" @input="emitCropUpdate" />
       </label>
     </div>
 
     <div class="mt-4 flex flex-wrap items-center gap-3">
       <button class="action-button secondary-button" type="button" :disabled="!hasSource" @click="emit('apply-crop')">
+        <Crop class="button-icon" />
         重新裁剪
       </button>
       <label class="flex items-center gap-2 text-sm text-slate-300">
@@ -158,13 +164,16 @@ defineExpose({
       </label>
     </div>
 
-    <div class="mt-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+    <details class="compact-details mt-3">
+      <summary>剩余牌数 OCR 区域</summary>
+      <div class="mt-3 rounded-lg border border-slate-800 bg-slate-950/60 p-4">
       <div class="flex items-center justify-between gap-3">
         <div>
-          <h3 class="text-sm font-semibold text-slate-200">剩余牌数 OCR 区域</h3>
+          <h3 class="section-title-row text-sm font-semibold text-slate-200"><SlidersHorizontal class="section-title-icon" />剩余牌数 OCR 区域</h3>
           <p class="mt-1 text-xs text-slate-400">独立于日志区域，使用整张游戏画面的像素坐标裁剪。</p>
         </div>
         <button class="action-button secondary-button" type="button" @click="emit('reset-deck-count-crop')">
+          <RotateCcw class="button-icon" />
           恢复默认
         </button>
       </div>
@@ -187,7 +196,8 @@ defineExpose({
           <input v-model.number="localDeckCountCropRect.height" class="input-shell w-full" min="1" type="number" @input="emitDeckCountRoiUpdate" />
         </label>
       </div>
-    </div>
+      </div>
+    </details>
 
     <p v-if="captureError" class="mt-3 rounded-2xl border border-red-400/20 bg-red-950/30 px-4 py-3 text-sm text-red-200">
       {{ captureError }}

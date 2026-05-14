@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue"
+import { BookMarked, ClipboardCheck, Library, ScanLine, Server, Swords } from "lucide-vue-next"
 import {
   applySemanticEventDedupe,
   CYCLE_TOTAL_EXCEED_NOTE,
@@ -69,8 +70,8 @@ const ocrMetrics = ref({
   lastOcrDurationMs: 0
 })
 const moduleTabs = [
-  { value: "live", label: "实时对局", icon: "▣" },
-  { value: "alias", label: "别名学习", icon: "⌘" }
+  { value: "live", label: "实时对局", icon: Swords },
+  { value: "alias", label: "别名学习", icon: BookMarked }
 ]
 let autoTimer: number | undefined
 let lastOcrAtMs = 0
@@ -609,23 +610,26 @@ onBeforeUnmount(() => {
     <div class="mx-auto max-w-[1880px]">
       <header class="app-header">
         <div class="brand-lockup">
-          <div class="brand-mark">S</div>
+          <div class="brand-mark">杀</div>
           <div>
-            <h1>xxxxx</h1>
+            <h1>OCR</h1>
             <p>公开日志 · OCR 记牌 · 不读取隐藏信息</p>
           </div>
         </div>
 
         <div class="header-actions">
           <div class="status-pill" :class="apiOnline ? 'is-good' : 'is-muted'">
+            <Server class="pill-icon" />
             <span class="status-dot" />
             <span>API {{ apiOnline ? "在线" : apiStatusLabel }}</span>
           </div>
           <div class="status-pill" :class="ocrReady ? 'is-good' : 'is-muted'">
+            <ScanLine class="pill-icon" />
             <span class="status-dot" />
             <span>OCR {{ ocrReady ? "ready" : ocr.engineStatus.value }}</span>
           </div>
           <label class="deck-switcher">
+            <Library class="pill-icon gold-text" />
             <span>当前牌堆:</span>
             <select
               :value="session.deckProfile.value.id"
@@ -637,6 +641,7 @@ onBeforeUnmount(() => {
             </select>
           </label>
           <button class="action-button header-primary" type="button" @click="session.endCurrentSession()">
+            <ClipboardCheck class="button-icon" />
             结束本局并生成报告
           </button>
         </div>
@@ -671,13 +676,16 @@ onBeforeUnmount(() => {
             @update:preprocess-enabled="screen.preprocessEnabled.value = $event"
           />
 
-          <CropPreview
-            :original-src="screen.originalPreviewUrl.value"
-            :cropped-src="screen.croppedPreviewUrl.value"
-            :processed-src="screen.processedPreviewUrl.value"
-            :deck-count-cropped-src="screen.deckCountCroppedPreviewUrl.value"
-            :deck-count-processed-src="screen.deckCountProcessedPreviewUrl.value"
-          />
+          <details class="compact-details">
+            <summary>裁剪与预处理预览</summary>
+            <CropPreview
+              :original-src="screen.originalPreviewUrl.value"
+              :cropped-src="screen.croppedPreviewUrl.value"
+              :processed-src="screen.processedPreviewUrl.value"
+              :deck-count-cropped-src="screen.deckCountCroppedPreviewUrl.value"
+              :deck-count-processed-src="screen.deckCountProcessedPreviewUrl.value"
+            />
+          </details>
         </div>
 
         <div class="space-y-6">
@@ -728,12 +736,15 @@ onBeforeUnmount(() => {
             @update:require-confirm-reshuffle="autoListenConfig.requireConfirmReshuffle = $event"
           />
 
-          <ParsedEventsPanel
-            :events="session.parsedEvents.value"
-            @accept="acceptEventWithGuard"
-            @reject="session.updateEventStatus($event, 'rejected')"
-            @accept-high-confidence="session.acceptAllHighConfidence()"
-          />
+          <details class="compact-details">
+            <summary>待确认事件（{{ session.parsedEvents.value.length }}）</summary>
+            <ParsedEventsPanel
+              :events="session.parsedEvents.value"
+              @accept="acceptEventWithGuard"
+              @reject="session.updateEventStatus($event, 'rejected')"
+              @accept-high-confidence="session.acceptAllHighConfidence()"
+            />
+          </details>
         </div>
 
         <div class="space-y-6">
