@@ -9,7 +9,28 @@ import {
 } from "./normalize"
 import { canonicalPlayerKey, canonicalTargetKey, isSuspiciousPlayerName } from "./player"
 import { isChooseGeneralLine } from "./startSignal"
-import type { CardName, DeckProfile, OcrLine, ParsedLogEvent, ParseQuality } from "./types"
+import type { CardName, DeckProfile, OcrLine, ParsedLogEvent, ParseQuality, TruncatedCardCompletionRule } from "./types"
+
+type CardMatchType = "exact" | "truncated-suffix" | "truncated-prefix"
+
+type ResolvedCardDetail = {
+  cardName?: ParsedLogEvent["cardName"] | undefined
+  suit?: string | undefined
+  rank?: string | undefined
+  note?: string | undefined
+  matchType?: CardMatchType | undefined
+  confidence?: number | undefined
+}
+
+let runtimeTruncatedCardCompletionRules: TruncatedCardCompletionRule[] = []
+
+export function setRuntimeTruncatedCardCompletionRules(rules: TruncatedCardCompletionRule[]): void {
+  runtimeTruncatedCardCompletionRules = rules.filter((rule) => rule.enabled)
+}
+
+export function loadTruncatedCardCompletionRules(): TruncatedCardCompletionRule[] {
+  return [...runtimeTruncatedCardCompletionRules]
+}
 
 const BRACKETED_CARD_PATTERN =
   /^(?<player>.+?)(?<verb>使用了|使用|打出了|打出|弃置了|弃置|装备了|装备|判定牌为)【(?<content>.+?)】$/u
@@ -147,29 +168,102 @@ function applyDeckSupport(event: ParsedLogEvent, deckProfile: DeckProfile): Pars
   }
 }
 
+export function findCardNameByPartialMatch(
+  fragment: string,
+  deckProfile: DeckProfile
+): {
+  cardName: CardName
+  matchType: CardMatchType
+  confidence: number
+} | undefined {
+  const normalizedFragment = normalizeText(fragment)
+  if (normalizedFragment.length < 2) {
+    return undefined
+  }
+
+  const cardNames = [...new Set(deckProfile.cards.map((card) => card.name))]
+  const exactMatch = cardNames.find((cardName) => cardName === normalizedFragment)
+  if (exactMatch) {
+    return {
+      cardName: exactMatch,
+      matchType: "exact",
+      confidence: 1
+    }
+  }
+
+  const ruleMatches = runtimeTruncatedCardCompletionRules.filter(
+    (rule) =>
+      normalizeText(rule.fragment) === normalizedFragment &&
+      cardNames.includes(rule.canonical)
+  )
+  const uniqueRuleCanonicals = [...new Set(ruleMatches.map((rule) => `${rule.canonical}|${rule.direction}`))]
+  if (uniqueRuleCanonicals.length === 1 && ruleMatches[0]) {
+    return {
+      cardName: ruleMatches[0].canonical,
+      matchType: ruleMatches[0].direction === "prefix-missing" ? "truncated-suffix" : "truncated-prefix",
+      confidence: ruleMatches[0].confidence
+    }
+  }
+
+  const suffixMatches = cardNames.filter(
+    (cardName) => cardName.length > normalizedFragment.length && cardName.endsWith(normalizedFragment)
+  )
+  if (suffixMatches.length === 1) {
+    const cardName = suffixMatches[0]!
+    return {
+      cardName,
+      matchType: "truncated-suffix",
+      confidence: normalizedFragment.length / cardName.length
+    }
+  }
+
+  const prefixMatches = cardNames.filter(
+    (cardName) => cardName.length > normalizedFragment.length && cardName.startsWith(normalizedFragment)
+  )
+  if (prefixMatches.length === 1) {
+    const cardName = prefixMatches[0]!
+    return {
+      cardName,
+      matchType: "truncated-prefix",
+      confidence: normalizedFragment.length / cardName.length
+    }
+  }
+
+  return undefined
+}
+
 function resolveCardDetail(
   content: string,
   deckProfile: DeckProfile
-): {
-  cardName?: ParsedLogEvent["cardName"] | undefined
-  suit?: string | undefined
-  rank?: string | undefined
-  note?: string | undefined
-} {
+): ResolvedCardDetail {
   const normalizedContent = normalizeText(content)
   const suitRankMatch = normalizedContent.match(SUIT_RANK_CARD_PATTERN)
   const suit = normalizeSuit(suitRankMatch?.groups?.suit)
   const rank = suitRankMatch?.groups?.rank
   const cardLabel = suitRankMatch?.groups?.card ?? normalizedContent
-  const knownCardName = findKnownCardNameByLongestMatch(cardLabel) ?? normalizeCardName(cardLabel)
-  const deckCardName = findCardNameByLongestMatch(cardLabel, deckProfile)
-  const cardName = knownCardName ?? deckCardName
+  const normalizedCardLabel = normalizeText(cardLabel)
+  const directKnownCardName = isKnownCardName(normalizedCardLabel) ? normalizedCardLabel : normalizeCardName(normalizedCardLabel)
+  const directDeckCardName = deckProfile.cards.some((card) => card.name === normalizedCardLabel) ? normalizedCardLabel : undefined
+  const longestKnownCardName = findKnownCardNameByLongestMatch(cardLabel)
+  const longestDeckCardName = findCardNameByLongestMatch(cardLabel, deckProfile)
+  const partialMatch = findCardNameByPartialMatch(cardLabel, deckProfile)
+  const cardName = directKnownCardName ?? directDeckCardName ?? longestKnownCardName ?? longestDeckCardName ?? partialMatch?.cardName
+  const matchType: CardMatchType | undefined =
+    directKnownCardName || directDeckCardName || longestKnownCardName || longestDeckCardName
+      ? "exact"
+      : partialMatch?.matchType
 
   return {
     cardName,
     suit,
     rank,
-    note: cardName ? undefined : `未识别牌名：${normalizedContent}`
+    matchType,
+    confidence: partialMatch?.confidence ?? (cardName ? 1 : undefined),
+    note: cardName
+      ? matchType && matchType !== "exact"
+        ? "疑似牌名截断补全"
+        : undefined
+      : `未识别牌名：${normalizedContent}`
   }
 }
 
@@ -202,18 +296,14 @@ function findAllKnownCardNames(text: string): string[] {
   )
 }
 
-function findGainKnownCardNames(content: string, deckProfile: DeckProfile): CardName[] {
+function findGainKnownCardDetails(content: string, deckProfile: DeckProfile): ResolvedCardDetail[] {
   const normalizedContent = normalizeText(content)
   const segments = normalizedContent
     .split(/[，,、]/u)
     .map((segment) => segment.trim())
     .filter(Boolean)
 
-  const cardNames = (segments.length > 0 ? segments : [normalizedContent])
-    .map((segment) => resolveCardDetail(segment, deckProfile).cardName)
-    .filter((cardName): cardName is CardName => Boolean(cardName && isCardInDeck(deckProfile, cardName)))
-
-  return cardNames
+  return (segments.length > 0 ? segments : [normalizedContent]).map((segment) => resolveCardDetail(segment, deckProfile))
 }
 
 function hasConflictingActionKeywords(text: string): boolean {
@@ -286,10 +376,14 @@ function parseSingleLine(
     const playerName = gainKnownMatch.groups.player
     const sourceName = gainKnownMatch.groups.source ?? "摸牌堆"
     const content = gainKnownMatch.groups.content ?? ""
-    const cardNames = findGainKnownCardNames(content, deckProfile)
+    const gainDetails = findGainKnownCardDetails(content, deckProfile)
+    const cardNames = gainDetails
+      .map((detail) => detail.cardName)
+      .filter((cardName): cardName is CardName => Boolean(cardName && isCardInDeck(deckProfile, cardName)))
     const detail = resolveCardDetail(content, deckProfile)
     const suspiciousPlayer = isSuspiciousPlayerName(playerName)
     const conflictingActions = hasConflictingActionKeywords(normalizedText)
+    const hasPartialMatch = gainDetails.some((item) => item.cardName && item.matchType && item.matchType !== "exact")
 
     if (PURE_DRAW_COUNT_PATTERN.test(normalizeText(content))) {
       return parseIgnoredLine(rawText, confidence, source, index)
@@ -305,7 +399,7 @@ function parseSingleLine(
 
     const quality: ParseQuality = !cardNames.length
       ? "ambiguous"
-      : suspiciousPlayer || conflictingActions || !hasPlayerName(playerName)
+      : suspiciousPlayer || conflictingActions || !hasPlayerName(playerName) || hasPartialMatch
         ? "ambiguous"
         : "strict"
 
@@ -380,7 +474,7 @@ function parseSingleLine(
           status: "pending",
           note: detail.cardName ? "判定结果公开牌" : hasOnlySuit ? "未识别判定牌名" : detail.note
         },
-        detail.cardName && hasPlayerName(judgeResultMatch.groups.player) ? "strict" : "ambiguous"
+        detail.cardName && detail.matchType === "exact" && hasPlayerName(judgeResultMatch.groups.player) ? "strict" : "ambiguous"
       ),
       deckProfile
     )
@@ -403,7 +497,7 @@ function parseSingleLine(
           status: "pending",
           note: detail.note
         },
-        detail.cardName && hasPlayerName(bracketMatch.groups.player) ? "strict" : "ambiguous"
+        detail.cardName && detail.matchType === "exact" && hasPlayerName(bracketMatch.groups.player) ? "strict" : "ambiguous"
       ),
       deckProfile
     )
@@ -427,7 +521,7 @@ function parseSingleLine(
           status: "pending",
           note: detail.note
         },
-        detail.cardName && hasPlayerName(letEquipMatch.groups.player) && hasPlayerName(letEquipMatch.groups.target) ? "strict" : "ambiguous"
+        detail.cardName && detail.matchType === "exact" && hasPlayerName(letEquipMatch.groups.player) && hasPlayerName(letEquipMatch.groups.target) ? "strict" : "ambiguous"
       ),
       deckProfile
     )
@@ -439,6 +533,7 @@ function parseSingleLine(
     const detail = resolveCardDetail(content, deckProfile)
     const isStrict =
       Boolean(detail.cardName) &&
+      detail.matchType === "exact" &&
       hasPlayerName(targetUseMatch.groups.player) &&
       hasPlayerName(targetUseMatch.groups.target) &&
       !isSuspiciousContent(content)
@@ -467,7 +562,8 @@ function parseSingleLine(
   if (directMatch?.groups) {
     const content = directMatch.groups.content ?? ""
     const detail = resolveCardDetail(content, deckProfile)
-    const isStrict = Boolean(detail.cardName) && hasPlayerName(directMatch.groups.player) && !isSuspiciousContent(content)
+    const isStrict =
+      Boolean(detail.cardName) && detail.matchType === "exact" && hasPlayerName(directMatch.groups.player) && !isSuspiciousContent(content)
     return applyDeckSupport(
       withQuality(
         {

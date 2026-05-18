@@ -370,7 +370,14 @@ export class SessionService {
       ...(sessionCandidates.length
         ? sessionCandidates.map(
             (candidate) =>
-              `${candidate.alias} -> ${candidate.suggestedCanonical} confidence=${candidate.confidence.toFixed(2)} count=${candidate.count} status=${candidate.status}`
+              [
+                `${candidate.alias} -> ${candidate.suggestedCanonical}`,
+                `类型：${candidate.kind === "truncated-prefix" || candidate.kind === "truncated-suffix" ? "截断补全" : candidate.kind === "user-correction" ? "人工修正" : candidate.kind === "dirty-text" ? "疑似脏文本" : "OCR误识别"}`,
+                `confidence=${candidate.confidence.toFixed(2)} count=${candidate.count} status=${candidate.status}`,
+                candidate.kind === "truncated-prefix" || candidate.kind === "truncated-suffix"
+                  ? "建议：优先检查 ROI 或行框 padding，不建议加入别名字典"
+                  : `建议：${candidate.canAcceptAsAlias ? "可加入 OCR alias 字典" : "建议人工复核后再决定"}`
+              ].join("\n")
           )
         : ["暂无候选别名"])
     ]

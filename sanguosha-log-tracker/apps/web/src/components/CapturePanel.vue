@@ -130,6 +130,16 @@ function emitDeckCountRoiUpdate(): void {
   emit("update-deck-count-crop", localDeckCountCropRect.value, getSourceSize())
 }
 
+function expandLogCropLeft(pixels: number): void {
+  const actualShift = Math.min(Math.max(0, pixels), localCropRect.value.x)
+  localCropRect.value = {
+    ...localCropRect.value,
+    x: Math.max(0, localCropRect.value.x - actualShift),
+    width: localCropRect.value.width + actualShift
+  }
+  emitCropUpdate()
+}
+
 function handleFileChange(event: Event): void {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
@@ -420,6 +430,14 @@ defineExpose({
       <button class="action-button secondary-button" type="button" :disabled="!hasSource" @click="emit('apply-crop')">
         <Crop class="button-icon" />
         重新裁剪
+      </button>
+      <button class="action-button secondary-button" type="button" @click="expandLogCropLeft(8)">
+        <Crop class="button-icon" />
+        日志 ROI 向左扩 8px
+      </button>
+      <button class="action-button secondary-button" type="button" @click="expandLogCropLeft(16)">
+        <Crop class="button-icon" />
+        日志 ROI 向左扩 16px
       </button>
       <label class="flex items-center gap-2 text-sm text-slate-300">
         <input

@@ -363,19 +363,112 @@ function canvasToEvidenceImage(canvas: HTMLCanvasElement): OcrEvidenceImage {
     dataUrl,
     width: output.width,
     height: output.height,
+    sourceWidth: canvas.width,
+    sourceHeight: canvas.height,
     capturedAt: Date.now(),
     kind: "logRoi",
     mimeType: dataUrl.slice(5, dataUrl.indexOf(";"))
   }
 }
 
-function attachEvidenceImage(events: ParsedLogEvent[], canvas: HTMLCanvasElement | null): ParsedLogEvent[] {
+function extractBoxRect(box: unknown): { x: number; y: number; width: number; height: number } | undefined {
+  if (!box) {
+    return undefined
+  }
+
+  if (Array.isArray(box)) {
+    const points = box.filter(
+      (point): point is [number, number] => Array.isArray(point) && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1]))
+    )
+    if (points.length === 0) {
+      return undefined
+    }
+    const xs = points.map((point) => Number(point[0]))
+    const ys = points.map((point) => Number(point[1]))
+    const left = Math.min(...xs)
+    const top = Math.min(...ys)
+    const right = Math.max(...xs)
+    const bottom = Math.max(...ys)
+    return {
+      x: left,
+      y: top,
+      width: Math.max(1, right - left),
+      height: Math.max(1, bottom - top)
+    }
+  }
+
+  if (typeof box === "object") {
+    const record = box as Record<string, unknown>
+    const left = Number(record.x ?? record.left)
+    const top = Number(record.y ?? record.top)
+    const width = Number(record.width)
+    const height = Number(record.height)
+    if ([left, top, width, height].every(Number.isFinite)) {
+      return {
+        x: left,
+        y: top,
+        width: Math.max(1, width),
+        height: Math.max(1, height)
+      }
+    }
+  }
+
+  return undefined
+}
+
+function cropCanvasToLineEvidence(canvas: HTMLCanvasElement, box: unknown): HTMLCanvasElement | undefined {
+  const rect = extractBoxRect(box)
+  if (!rect) {
+    return undefined
+  }
+
+  const safeX = Math.max(0, Math.floor(rect.x - 12))
+  const safeY = Math.max(0, Math.floor(rect.y - 4))
+  const maxWidth = Math.max(1, canvas.width - safeX)
+  const maxHeight = Math.max(1, canvas.height - safeY)
+  const safeWidth = Math.min(maxWidth, Math.ceil(rect.width + 24))
+  const safeHeight = Math.min(maxHeight, Math.ceil(rect.height + 8))
+  const output = document.createElement("canvas")
+  output.width = Math.max(1, safeWidth)
+  output.height = Math.max(1, safeHeight)
+
+  const context = output.getContext("2d")
+  if (!context) {
+    return undefined
+  }
+
+  context.drawImage(canvas, safeX, safeY, safeWidth, safeHeight, 0, 0, safeWidth, safeHeight)
+  return output
+}
+
+function attachEvidenceImage(
+  events: ParsedLogEvent[],
+  canvas: HTMLCanvasElement | null,
+  sourceLines: OcrLine[] = []
+): ParsedLogEvent[] {
   if (!canvas || !events.some(isAliasEvidenceEvent)) {
     return events
   }
 
-  const evidenceImage = canvasToEvidenceImage(canvas)
-  return events.map((event) => (isAliasEvidenceEvent(event) ? { ...event, evidenceImage } : event))
+  const evidenceByText = new Map<string, OcrEvidenceImage>()
+  const fullEvidenceImage = canvasToEvidenceImage(canvas)
+
+  return events.map((event) => {
+    if (!isAliasEvidenceEvent(event)) {
+      return event
+    }
+
+    const cached = evidenceByText.get(event.rawText)
+    if (cached) {
+      return { ...event, evidenceImage: cached }
+    }
+
+    const line = sourceLines.find((item) => item.text === event.rawText && item.box)
+    const croppedCanvas = line ? cropCanvasToLineEvidence(canvas, line.box) : undefined
+    const evidenceImage = croppedCanvas ? canvasToEvidenceImage(croppedCanvas) : fullEvidenceImage
+    evidenceByText.set(event.rawText, evidenceImage)
+    return { ...event, evidenceImage }
+  })
 }
 
 async function ingestOcrLines(
@@ -399,7 +492,8 @@ async function ingestOcrLines(
       parseLogInput(orderLinesForProcessing(linesForParse), source, session.deckProfile.value),
       semanticEventDeduper
     ),
-    evidenceCanvas
+    evidenceCanvas,
+    linesForParse
   )
   ocrMetrics.value = {
     ...ocrMetrics.value,
@@ -538,7 +632,7 @@ async function runAutoOcr(canvas: HTMLCanvasElement): Promise<void> {
     })
 
     if (stateBeforeBatch.mode === "armed" && result.resetTracker) {
-      const eventsWithEvidence = attachEvidenceImage(result.events, canvas)
+      const eventsWithEvidence = attachEvidenceImage(result.events, canvas, linesForBatch)
       autoSessionState.value = {
         ...result.nextState,
         mode: "gameStarting"
@@ -568,7 +662,7 @@ async function runAutoOcr(canvas: HTMLCanvasElement): Promise<void> {
       updateOcrMetrics(rawLines, mergedLines, 0, [], 0, Math.round(performance.now() - startedAt))
       autoStatus.value = "中途接入基线已建立，后续只统计新增公开日志"
     } else {
-      const eventsWithEvidence = attachEvidenceImage(result.events, canvas)
+      const eventsWithEvidence = attachEvidenceImage(result.events, canvas, linesForBatch)
       autoSessionState.value = result.nextState
       if (eventsWithEvidence.length > 0) {
         await session.ingestParsedEvents(eventsWithEvidence)
@@ -829,7 +923,7 @@ onBeforeUnmount(() => {
       </header>
 
       <main v-if="activeModule === 'live'" class="battle-grid">
-        <div class="space-y-6">
+        <div class="space-y-6 battle-column capture-column">
           <CapturePanel
             ref="capturePanelRef"
             :stream="screen.stream.value"
@@ -864,7 +958,7 @@ onBeforeUnmount(() => {
           </details>
         </div>
 
-        <div class="space-y-6">
+        <div class="space-y-6 battle-column ocr-column">
           <OcrPanel
             :engine-status="ocr.engineStatus.value"
             :engine-error="ocr.errorMessage.value"
@@ -925,7 +1019,7 @@ onBeforeUnmount(() => {
           </details>
         </div>
 
-        <div class="space-y-6">
+        <div class="space-y-6 battle-column deck-column">
           <DeckPanel
             :deck-profile="session.deckProfile.value"
             :deck-profiles="session.deckProfiles"

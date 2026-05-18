@@ -312,8 +312,21 @@ button.ui-tag {
 
 .battle-grid {
   display: grid;
-  grid-template-columns: minmax(20rem, 0.9fr) minmax(27rem, 1.05fr) minmax(23rem, 1fr);
+  grid-template-columns: repeat(12, minmax(0, 1fr));
   gap: 0.65rem;
+}
+
+.battle-column {
+  min-width: 0;
+}
+
+.capture-column,
+.ocr-column {
+  grid-column: span 6;
+}
+
+.deck-column {
+  grid-column: 1 / -1;
 }
 
 .alias-page {
@@ -663,6 +676,12 @@ button.ui-tag {
 @media (max-width: 1280px) {
   .battle-grid {
     grid-template-columns: 1fr;
+  }
+
+  .capture-column,
+  .ocr-column,
+  .deck-column {
+    grid-column: auto;
   }
 
   .app-header {

@@ -5,12 +5,13 @@ import { SessionService } from "./session.service.js"
 
 @Injectable()
 export class AliasMiningScheduler {
+  private static readonly CRON_NAME = "alias-mining-ended-sessions"
   private readonly logger = new Logger(AliasMiningScheduler.name)
   private running = false
 
   constructor(@Inject(SessionService) private readonly sessionService: SessionService) {}
 
-  @Cron("*/30 * * * * *")
+  @Cron("*/30 * * * * *", { name: AliasMiningScheduler.CRON_NAME })
   async handleEndedSessions(): Promise<void> {
     if (this.running) {
       return

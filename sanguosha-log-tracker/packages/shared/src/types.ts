@@ -40,6 +40,8 @@ export type OcrEvidenceImage = {
   dataUrl: string
   width: number
   height: number
+  sourceWidth?: number | undefined
+  sourceHeight?: number | undefined
   capturedAt: number
   kind: "logRoi"
   mimeType?: string | undefined
@@ -189,10 +191,30 @@ export type OcrAliasEntry = {
   note?: string | undefined
 }
 
+export type AliasCandidateKind =
+  | "ocr-alias"
+  | "truncated-prefix"
+  | "truncated-suffix"
+  | "user-correction"
+  | "dirty-text"
+
+export type TruncatedCardCompletionRule = {
+  id: string
+  fragment: string
+  canonical: CardName
+  direction: "prefix-missing" | "suffix-missing"
+  enabled: boolean
+  confidence: number
+  createdAt: number
+  note?: string | undefined
+}
+
 export type OcrAliasCandidate = {
   id: string
   alias: string
   suggestedCanonical: CardName
+  kind: AliasCandidateKind
+  canAcceptAsAlias: boolean
   confidence: number
   count: number
   sources: Array<"unknownEvent" | "ambiguousEvent" | "userCorrection" | "fuzzyMatch" | "overLimitEvent">
@@ -203,10 +225,12 @@ export type OcrAliasCandidate = {
     normalizedText?: string | undefined
     eventId?: string | undefined
     evidenceImage?: OcrEvidenceImage | undefined
+    lineBox?: unknown
   }>
   status: "pending" | "accepted" | "rejected"
   createdAt: number
   updatedAt?: number | undefined
+  note?: string | undefined
 }
 
 export type SessionExportStatus = "pending" | "exported" | "aliasAnalyzed" | "failed"

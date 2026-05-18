@@ -10,6 +10,7 @@ import {
   rejectEvent,
   setManualDeckRemaining,
   setRuntimeOcrAliases,
+  setRuntimeTruncatedCardCompletionRules,
   undoEvent,
   undoLastEvent,
   updateDeckRemainingState,
@@ -51,8 +52,12 @@ export function useTrackerSession() {
       apiStatus.value = "online"
       runtimeMode.value = "remote"
       deckProfile.value = await apiClient.getDemoDeckProfile()
-      const aliases = await apiClient.getAliases()
+      const [aliases, truncatedRules] = await Promise.all([
+        apiClient.getAliases(),
+        apiClient.getTruncatedCardCompletions()
+      ])
       setRuntimeOcrAliases(aliases)
+      setRuntimeTruncatedCardCompletionRules(truncatedRules)
       const session = await apiClient.createSession()
       sessionId.value = session.sessionId
       trackerState.value = session.state
@@ -61,6 +66,7 @@ export function useTrackerSession() {
       apiStatus.value = "offline"
       runtimeMode.value = "local"
       sessionId.value = null
+      setRuntimeTruncatedCardCompletionRules([])
       setLocalState(defaultDeckProfile)
       statusMessage.value = "API 不可用，已自动切换到前端本地演示模式。"
     }

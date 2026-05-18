@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { happyTwoVTwoDeckProfile, oneVOneDeckProfile } from "../src/cards"
-import { mergeBrokenOcrLines, parseLogInput } from "../src/parser"
+import { findCardNameByPartialMatch, mergeBrokenOcrLines, parseLogInput } from "../src/parser"
 
 describe("parseLogInput", () => {
   it("parses target use logs without brackets", () => {
@@ -151,6 +151,25 @@ describe("parseLogInput", () => {
     const [event] = parseLogInput("黄月英对周泰（您）使用过问拆桥", "manual", oneVOneDeckProfile)
 
     expect(event).toMatchObject({ action: "use", cardName: "过河拆桥", quality: "strict" })
+  })
+
+  it("finds unique truncated suffix card names conservatively", () => {
+    expect(findCardNameByPartialMatch("园结义", happyTwoVTwoDeckProfile)).toMatchObject({
+      cardName: "桃园结义",
+      matchType: "truncated-suffix"
+    })
+  })
+
+  it("keeps partial card matches ambiguous and non-auto-acceptable", () => {
+    const [event] = parseLogInput("黄月英对周泰（您）使用园结义", "manual", happyTwoVTwoDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "use",
+      cardName: "桃园结义",
+      quality: "ambiguous",
+      autoAcceptable: false
+    })
+    expect(event.note).toContain("疑似牌名截断补全")
   })
 
   it("merges broken OCR lines for 过河拆桥", () => {

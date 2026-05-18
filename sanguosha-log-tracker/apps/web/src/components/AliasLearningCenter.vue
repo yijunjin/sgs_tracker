@@ -1,7 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue"
 import { Ban, BookOpenCheck, Check, ClipboardList, Database, Eye, Plus, RefreshCw, Search, Trash2, X } from "lucide-vue-next"
-import { cardNames, setRuntimeOcrAliases, type OcrAliasCandidate, type OcrAliasEntry, type OcrEvidenceImage } from "@slt/shared"
+import {
+  cardNames,
+  setRuntimeOcrAliases,
+  setRuntimeTruncatedCardCompletionRules,
+  type AliasCandidateKind,
+  type OcrAliasCandidate,
+  type OcrAliasEntry,
+  type OcrEvidenceImage,
+  type TruncatedCardCompletionRule
+} from "@slt/shared"
 
 import { showGlobalMessage } from "../composables/useGlobalMessage"
 import { apiClient } from "../services/apiClient"
@@ -30,6 +39,7 @@ const minRealGameParsedEvents = 20
 const sessions = ref<SessionListItem[]>([])
 const candidates = ref<OcrAliasCandidate[]>([])
 const aliases = ref<OcrAliasEntry[]>([])
+const truncatedCompletionRules = ref<TruncatedCardCompletionRule[]>([])
 const newAlias = ref("")
 const newCanonical = ref(cardNames[0] ?? "")
 const activeAliasSourceFilter = ref<AliasSourceFilter>(null)
@@ -208,6 +218,38 @@ function candidateStatusLabel(status: OcrAliasCandidate["status"]): string {
     rejected: "已拒绝"
   }
   return labels[status]
+}
+
+function candidateKindLabel(kind: AliasCandidateKind): string {
+  const labels: Record<AliasCandidateKind, string> = {
+    "ocr-alias": "OCR误识别",
+    "user-correction": "人工修正",
+    "truncated-prefix": "截断补全",
+    "truncated-suffix": "截断补全",
+    "dirty-text": "疑似脏文本"
+  }
+  return labels[kind]
+}
+
+function candidateKindVariant(kind: AliasCandidateKind): "success" | "warning" | "danger" | "muted" {
+  if (kind === "ocr-alias" || kind === "user-correction") {
+    return "success"
+  }
+  if (kind === "dirty-text") {
+    return "danger"
+  }
+  return "warning"
+}
+
+function candidateAcceptLabel(candidate: OcrAliasCandidate): string {
+  return candidate.canAcceptAsAlias ? "可加入别名库" : "不建议加入别名库"
+}
+
+function candidateAcceptVariant(candidate: OcrAliasCandidate): "success" | "warning" | "danger" {
+  if (candidate.canAcceptAsAlias) {
+    return "success"
+  }
+  return candidate.kind === "dirty-text" ? "danger" : "warning"
 }
 
 function aliasSourceLabel(source: OcrAliasEntry["source"]): string {
@@ -425,15 +467,18 @@ function handleEvidenceModalVisibility(nextValue: boolean): void {
 
 async function refresh(): Promise<void> {
   try {
-    const [nextSessions, nextCandidates, nextAliases] = await Promise.all([
+    const [nextSessions, nextCandidates, nextAliases, nextTruncatedRules] = await Promise.all([
       apiClient.listSessions(),
       apiClient.getAliasCandidates(),
-      apiClient.getAliases()
+      apiClient.getAliases(),
+      apiClient.getTruncatedCardCompletions()
     ])
     sessions.value = nextSessions
     candidates.value = sortCandidates(nextCandidates)
     aliases.value = nextAliases
+    truncatedCompletionRules.value = nextTruncatedRules
     setRuntimeOcrAliases(nextAliases)
+    setRuntimeTruncatedCardCompletionRules(nextTruncatedRules)
   } catch (error) {
     setErrorMessage(error, "别名学习中心加载失败。")
   }
@@ -458,6 +503,17 @@ async function rejectCandidate(id: string): Promise<void> {
     await refresh()
   } catch (error) {
     setErrorMessage(error, "拒绝候选别名失败。")
+  }
+}
+
+async function acceptTruncatedCompletionCandidate(id: string): Promise<void> {
+  try {
+    const result = await apiClient.acceptTruncatedCardCompletionCandidate(id)
+    updateAnalyzedCandidate(result.candidate)
+    showGlobalMessage("截断补全规则已写入独立规则库。")
+    await refresh()
+  } catch (error) {
+    setErrorMessage(error, "加入截断补全规则失败。")
   }
 }
 
@@ -812,6 +868,8 @@ onMounted(() => {
           <colgroup>
             <col class="candidate-alias-col" />
             <col class="candidate-canonical-col" />
+            <col class="candidate-kind-col" />
+            <col class="candidate-accept-col" />
             <col class="candidate-count-col" />
             <col class="candidate-confidence-col" />
             <col class="candidate-source-col" />
@@ -822,6 +880,8 @@ onMounted(() => {
             <tr>
               <th>候选词</th>
               <th>建议牌名</th>
+              <th>类型</th>
+              <th>是否可加入别名库</th>
               <th>次数</th>
               <th>置信度</th>
               <th>来源</th>
@@ -837,6 +897,8 @@ onMounted(() => {
                 </button>
               </td>
               <td :title="candidate.suggestedCanonical">{{ candidate.suggestedCanonical }}</td>
+              <td :title="candidateKindLabel(candidate.kind)"><UiTag :variant="candidateKindVariant(candidate.kind)">{{ candidateKindLabel(candidate.kind) }}</UiTag></td>
+              <td :title="candidateAcceptLabel(candidate)"><UiTag :variant="candidateAcceptVariant(candidate)">{{ candidateAcceptLabel(candidate) }}</UiTag></td>
               <td :title="String(candidate.count)">{{ candidate.count }}</td>
               <td :title="candidate.confidence.toFixed(2)"><span class="confidence-pill">{{ candidate.confidence.toFixed(2) }}</span></td>
               <td :title="candidateSourcesLabel(candidate.sources)">{{ candidateSourcesLabel(candidate.sources) }}</td>
@@ -845,15 +907,31 @@ onMounted(() => {
                 <div class="flex gap-2">
                   <button class="action-button secondary-button compact-action" type="button" @click="openContextModal(candidate)">
                     <Eye class="button-icon" />
-                    上下文
+                    查看上下文
                   </button>
-                  <button class="action-button secondary-button compact-action" type="button" :disabled="candidate.status !== 'pending'" @click="acceptCandidate(candidate.id)">
+                  <button
+                    v-if="candidate.canAcceptAsAlias"
+                    class="action-button secondary-button compact-action"
+                    type="button"
+                    :disabled="candidate.status !== 'pending'"
+                    @click="acceptCandidate(candidate.id)"
+                  >
                     <Check class="button-icon" />
-                    接受
+                    接受为别名
+                  </button>
+                  <button
+                    v-else-if="candidate.kind === 'truncated-prefix' || candidate.kind === 'truncated-suffix'"
+                    class="action-button secondary-button compact-action"
+                    type="button"
+                    :disabled="candidate.status !== 'pending'"
+                    @click="acceptTruncatedCompletionCandidate(candidate.id)"
+                  >
+                    <Plus class="button-icon" />
+                    加入截断补全规则
                   </button>
                   <button class="action-button danger-button compact-action" type="button" :disabled="candidate.status !== 'pending'" @click="rejectCandidate(candidate.id)">
                     <X class="button-icon" />
-                    拒绝
+                    {{ candidate.kind === 'truncated-prefix' || candidate.kind === 'truncated-suffix' ? '忽略' : '拒绝' }}
                   </button>
                 </div>
               </td>
@@ -947,10 +1025,13 @@ onMounted(() => {
     >
       <div v-if="previewCandidate" class="space-y-3">
         <div class="flex flex-wrap gap-2">
+          <UiTag :variant="candidateKindVariant(previewCandidate.kind)">{{ candidateKindLabel(previewCandidate.kind) }}</UiTag>
           <UiTag variant="warning">{{ candidateSourcesLabel(previewCandidate.sources) }}</UiTag>
           <UiTag variant="success">置信度 {{ previewCandidate.confidence.toFixed(2) }}</UiTag>
+          <UiTag :variant="candidateAcceptVariant(previewCandidate)">{{ candidateAcceptLabel(previewCandidate) }}</UiTag>
           <UiTag :variant="candidateStatusVariant(previewCandidate.status)">{{ candidateStatusLabel(previewCandidate.status) }}</UiTag>
         </div>
+        <p v-if="previewCandidate.note" class="candidate-note">{{ previewCandidate.note }}</p>
 
         <article
           v-for="example in previewCandidate.examples"
@@ -959,14 +1040,14 @@ onMounted(() => {
         >
           <figure v-if="example.evidenceImage" class="candidate-evidence">
             <button class="candidate-evidence-button" type="button" @click="openEvidenceModal(example.evidenceImage)">
-            <img
-              :src="example.evidenceImage.dataUrl"
-              :width="example.evidenceImage.width"
-              :height="example.evidenceImage.height"
-              alt="当时的日志区域截图"
-            />
-            <figcaption>截图 {{ formatShortTime(example.evidenceImage.capturedAt) }}</figcaption>
+              <img
+                :src="example.evidenceImage.dataUrl"
+                :width="example.evidenceImage.width"
+                :height="example.evidenceImage.height"
+                alt="当时的日志区域截图"
+              />
             </button>
+            <figcaption>截图 {{ formatShortTime(example.evidenceImage.capturedAt) }}</figcaption>
           </figure>
           <p><span class="candidate-example-label">原始 OCR</span>{{ example.rawText }}</p>
           <p><span class="candidate-example-label">归一化</span>{{ example.normalizedText || "-" }}</p>
@@ -1041,7 +1122,7 @@ onMounted(() => {
 }
 
 .alias-candidate-table {
-  width: 72rem;
+  width: 88rem;
 }
 
 .alias-confirmed-table {
@@ -1193,6 +1274,14 @@ onMounted(() => {
   width: 5.5rem;
 }
 
+.candidate-kind-col {
+  width: 8rem;
+}
+
+.candidate-accept-col {
+  width: 9rem;
+}
+
 .candidate-confidence-col {
   width: 7rem;
 }
@@ -1206,7 +1295,7 @@ onMounted(() => {
 }
 
 .candidate-actions-col {
-  width: 18.5rem;
+  width: 22rem;
 }
 
 .confirmed-alias-col,
@@ -1247,6 +1336,16 @@ onMounted(() => {
 
 .candidate-link:hover {
   color: #ffe19e;
+}
+
+.candidate-note {
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  border-radius: 0.9rem;
+  background: rgba(120, 53, 15, 0.14);
+  color: #fde68a;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  padding: 0.75rem 0.9rem;
 }
 
 .session-count-button {

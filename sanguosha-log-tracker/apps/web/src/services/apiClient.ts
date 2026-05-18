@@ -6,6 +6,7 @@ import type {
   OcrLogRecord,
   ParsedLogEvent,
   SessionReport,
+  TruncatedCardCompletionRule,
   TrackerState,
   UserCorrectionRecord
 } from "@slt/shared"
@@ -76,6 +77,44 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch (error) {
       lastError = error
     }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("API request failed")
+}
+
+async function requestOptional<T>(path: string, fallback: T, init?: RequestInit): Promise<T> {
+  let sawCapabilityMiss = false
+  let lastError: unknown
+
+  for (const baseUrl of candidateApiBaseUrls()) {
+    try {
+      const response = await fetch(`${baseUrl}${path}`, {
+        headers: {
+          "Content-Type": "application/json",
+          ...(init?.headers ?? {})
+        },
+        ...init
+      })
+
+      if (response.ok) {
+        rememberApiBaseUrl(baseUrl)
+        return response.json() as Promise<T>
+      }
+
+      if (response.status === 404 || response.status === 501) {
+        sawCapabilityMiss = true
+        continue
+      }
+
+      lastError = new Error(`API request failed at ${baseUrl}: ${response.status} ${response.statusText}`)
+      throw lastError
+    } catch (error) {
+      lastError = error
+    }
+  }
+
+  if (sawCapabilityMiss) {
+    return fallback
   }
 
   throw lastError instanceof Error ? lastError : new Error("API request failed")
@@ -180,10 +219,21 @@ export const apiClient = {
   getAliasCandidates(status?: OcrAliasCandidate["status"]) {
     return request<OcrAliasCandidate[]>(`/ocr-alias-candidates${status ? `?status=${status}` : ""}`)
   },
+  getTruncatedCardCompletions() {
+    return requestOptional<TruncatedCardCompletionRule[]>("/truncated-card-completions", [])
+  },
   acceptAliasCandidate(id: string) {
     return request<{ candidate: OcrAliasCandidate; alias: OcrAliasEntry }>(`/ocr-alias-candidates/${id}/accept`, {
       method: "POST"
     })
+  },
+  acceptTruncatedCardCompletionCandidate(id: string) {
+    return request<{ candidate: OcrAliasCandidate; rule: TruncatedCardCompletionRule }>(
+      `/ocr-alias-candidates/${id}/accept-truncated-completion`,
+      {
+        method: "POST"
+      }
+    )
   },
   rejectAliasCandidate(id: string) {
     return request<OcrAliasCandidate>(`/ocr-alias-candidates/${id}/reject`, {
