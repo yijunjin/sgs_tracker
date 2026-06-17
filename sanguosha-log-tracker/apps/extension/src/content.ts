@@ -11,6 +11,7 @@ import {
   isAllyDrawText,
   allyDrawActor as sharedAllyDrawActor,
   allyGeneralNames,
+  normalizeText,
   type CardName,
   type DeckCardEntry,
   type DeckPileState,
@@ -74,6 +75,20 @@ type DeckCardRow = {
   type?: DeckCardEntry["type"]
   description?: string
   variants: DeckCardEntry[]
+}
+
+type GuanxingCardDetail = Pick<DeckCardEntry, "name" | "rank" | "suit" | "description">
+
+type GuanxingCard = {
+  cardId: number
+  detail?: GuanxingCardDetail
+}
+
+type GuanxingExportCard = {
+  cardId: number
+  name?: string
+  suit?: string
+  rank?: string
 }
 
 type LayaPosition = {
@@ -236,11 +251,12 @@ let lastProtocolDeckSignature = ""
 //   摆回牌堆：FromZone 8 → ToZone 1 (MoveType 7)，ToPosition 65280(0xFF00)=顶部、0/缺失=底部。
 // 真机抓包验证：摆到顶部组的 cardId 会被随后的摸牌(1→其它)按序摸走，故 guanxingTop 头部 = 下一张待摸。
 // guanxingBottom 垫在牌堆最底，本轮一般摸不到（除非洗牌前摸空），仅作信息展示。
-// 协议不下发花色点数，这里只追踪 cardId 与位置/数量，不显示具体牌面。
 const GUANXING_ZONE = 8
 const GUANXING_TOP_POSITION = 65280
-let guanxingTop: number[] = []
-let guanxingBottom: number[] = []
+let guanxingTop: GuanxingCard[] = []
+let guanxingBottom: GuanxingCard[] = []
+let pendingGuanxingTopDetails: GuanxingCardDetail[] = []
+let pendingGuanxingBottomDetails: GuanxingCardDetail[] = []
 let guanxingPeekCount = 0
 let guanxingAt = 0
 
@@ -271,7 +287,14 @@ type ExportPayload = {
   trackerState: TrackerState
   seenExactCards: ExactSeenCard[]
   exactCardStates: ExactSeenCard[]
-  guanxing?: { top: number[]; bottom: number[]; peekCount: number; at: number }
+  guanxing?: {
+    top: number[]
+    bottom: number[]
+    topCards?: GuanxingExportCard[]
+    bottomCards?: GuanxingExportCard[]
+    peekCount: number
+    at: number
+  }
   recentEvents: DisplayEvent[]
   diagnostics: CollectorDiagnostics
 }
@@ -510,6 +533,128 @@ function cardDescription(name: string): string | undefined {
   return deckProfile.cards.find((card) => card.name === name)?.description
 }
 
+function guanxingCardFromId(cardId: number): GuanxingCard {
+  return { cardId }
+}
+
+function guanxingExportCard(card: GuanxingCard): GuanxingExportCard {
+  return {
+    cardId: card.cardId,
+    ...(card.detail?.name ? { name: card.detail.name } : {}),
+    ...(card.detail?.suit ? { suit: card.detail.suit } : {}),
+    ...(card.detail?.rank ? { rank: card.detail.rank } : {})
+  }
+}
+
+function guanxingCardLabel(card: GuanxingCard): string {
+  if (card.detail) {
+    return cardFullLabel(card.detail)
+  }
+  return card.cardId > 0 ? `牌面未捕获 #${card.cardId}` : "牌面未捕获"
+}
+
+function guanxingCardsTip(label: string, cards: GuanxingCard[], hint: string): string {
+  const rows = cards.map((card, index) => `${index + 1}. ${guanxingCardLabel(card)}`)
+  return [label, hint, ...rows].filter(Boolean).join("\n")
+}
+
+function fillGuanxingDetails(queue: GuanxingCard[], details: GuanxingCardDetail[], edge: "head" | "tail"): GuanxingCardDetail[] {
+  if (!details.length) {
+    return []
+  }
+  const indices = queue
+    .map((card, index) => (card.detail ? -1 : index))
+    .filter((index) => index >= 0)
+  const targetIndices = edge === "head" ? indices.slice(0, details.length) : indices.slice(Math.max(0, indices.length - details.length))
+  targetIndices.forEach((queueIndex, detailIndex) => {
+    const card = queue[queueIndex]
+    const detail = details[detailIndex]
+    if (card && detail) {
+      card.detail = detail
+    }
+  })
+  return details.slice(targetIndices.length)
+}
+
+function attachDetailsToGuanxingCards(cards: GuanxingCard[], pendingDetails: GuanxingCardDetail[]): GuanxingCard[] {
+  pendingDetails.forEach((detail, index) => {
+    const card = cards[index]
+    if (card) {
+      card.detail = detail
+    }
+  })
+  return cards
+}
+
+function stripGuanxingPlacementPrefix(content: string): string {
+  return content
+    .replace(/^\s*(?:[一二三四五六七八九十两\d]+)张(?:卡牌|牌)?/u, "")
+    .replace(/^\s*卡牌/u, "")
+    .trim()
+}
+
+function guanxingCardDetailsFromContent(content: string): GuanxingCardDetail[] {
+  const normalizedContent = normalizeText(stripGuanxingPlacementPrefix(content))
+  if (!normalizedContent) {
+    return []
+  }
+  const aliases = exactCardNamesByLength()
+  if (!aliases.length) {
+    return []
+  }
+  const aliasMap = new Map(aliases.map((item) => [item.alias, item.canonical]))
+  const namePattern = aliases.map((item) => item.alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")
+  const pattern = new RegExp(`(${namePattern})([♠♥♣♦])?(A|10|[2-9JQK])?`, "gu")
+  const details: GuanxingCardDetail[] = []
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(normalizedContent))) {
+    const name = aliasMap.get(match[1] ?? "") ?? match[1]
+    if (!name) {
+      continue
+    }
+    const suit = normalizeSuitSymbol(match[2])
+    const rank = match[3]
+    const description = cardDescription(name)
+    details.push({
+      name,
+      ...(suit ? { suit } : {}),
+      ...(rank ? { rank } : {}),
+      ...(description ? { description } : {})
+    })
+  }
+  return details
+}
+
+function ingestGuanxingPlacementText(text: string, at: number): boolean {
+  if (!/置于牌堆[顶底]/u.test(text)) {
+    return false
+  }
+  let changed = false
+  const pattern = /置于牌堆([顶底])/gu
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(text))) {
+    const prefix = text.slice(0, match.index)
+    const lastJiangIndex = prefix.lastIndexOf("将")
+    const rawContent = lastJiangIndex >= 0 ? prefix.slice(lastJiangIndex + 1) : (prefix.split(/[，,。；;]/u).pop() ?? "")
+    const details = guanxingCardDetailsFromContent(rawContent)
+    if (!details.length) {
+      continue
+    }
+    const isTop = match[1] === "顶"
+    const displayOrderDetails = isTop ? [...details].reverse() : details
+    if (isTop) {
+      const leftovers = fillGuanxingDetails(guanxingTop, displayOrderDetails, "head")
+      pendingGuanxingTopDetails = leftovers.concat(pendingGuanxingTopDetails).slice(0, Math.max(8, guanxingPeekCount))
+    } else {
+      const leftovers = fillGuanxingDetails(guanxingBottom, displayOrderDetails, "tail")
+      pendingGuanxingBottomDetails = pendingGuanxingBottomDetails.concat(leftovers).slice(-Math.max(8, guanxingPeekCount))
+    }
+    guanxingAt = at
+    changed = true
+  }
+  return changed
+}
+
 function totalCards(): number {
   return getDeckTotalCount(deckProfile)
 }
@@ -600,6 +745,8 @@ function resetProtocolCardState(): void {
 function resetGuanxingState(): void {
   guanxingTop = []
   guanxingBottom = []
+  pendingGuanxingTopDetails = []
+  pendingGuanxingBottomDetails = []
   guanxingPeekCount = 0
   guanxingAt = 0
 }
@@ -698,7 +845,7 @@ function drawPileRemainingLabel(): string {
   return drawPileCalibrated ? String(drawPileRemaining) : `~${drawPileRemaining}`
 }
 
-// 观星控底信息条：协议不发牌面，仅展示控顶/控底的位置与数量（零猜测）。
+// 观星控底信息条：协议负责位置和数量；页面文本若暴露牌面，则补到 tooltip。
 // 顶部牌随摸牌出列，全部摸完则自动消失；底部牌垫底，本轮一般保留至洗牌。
 function renderGuanxing(): string {
   const topCount = guanxingTop.length
@@ -708,12 +855,14 @@ function renderGuanxing(): string {
   }
   const parts: string[] = []
   if (topCount > 0) {
-    parts.push(`<span class="sgs-gx-top" title="你观星控到牌堆顶、尚未被摸走的张数；队首即下一张摸牌">顶 ${topCount} 张待摸</span>`)
+    const topTip = guanxingCardsTip("你观星控到牌堆顶、尚未被摸走的牌", guanxingTop, "按摸牌顺序排列，1 即下一张摸牌")
+    parts.push(`<span class="sgs-gx-top" title="${escapeHtml(topTip)}">顶 ${topCount} 张待摸</span>`)
   }
   if (bottomCount > 0) {
-    parts.push(`<span class="sgs-gx-bottom" title="你观星垫到牌堆底的张数，本轮一般摸不到">底 ${bottomCount} 张垫底</span>`)
+    const bottomTip = guanxingCardsTip("你观星垫到牌堆底的牌", guanxingBottom, "本轮一般摸不到，洗牌后失效")
+    parts.push(`<span class="sgs-gx-bottom" title="${escapeHtml(bottomTip)}">底 ${bottomCount} 张垫底</span>`)
   }
-  const tip = `观星控底：查看过 ${guanxingPeekCount} 张；协议不下发牌面，仅追踪位置与数量`
+  const tip = `观星控底：查看过 ${guanxingPeekCount} 张；悬浮顶/底数字可看已捕获牌面`
   return `<div class="sgs-guanxing" title="${escapeHtml(tip)}"><span class="sgs-gx-head">观星控底</span>${parts.join("")}</div>`
 }
 
@@ -962,6 +1111,8 @@ function handleGuanxingMove(
     // 观星开始：牌堆顶若干张被取出观看。新一轮观星，丢弃上一轮残留。
     guanxingTop = []
     guanxingBottom = []
+    pendingGuanxingTopDetails = []
+    pendingGuanxingBottomDetails = []
     guanxingPeekCount = cardIds.length
     guanxingAt = at
     pushDisplayEvent({ at, type: "protocol", text: `观星：查看牌堆顶 ${cardIds.length} 张` })
@@ -970,11 +1121,19 @@ function handleGuanxingMove(
 
   if (fromZone === GUANXING_ZONE && toZone === 1) {
     // 摆回牌堆。顶部牌按“数组靠后=更接近下一张摸牌”排列（真机验证）；为便于消费，
-    // guanxingTop 头部即下一张待摸，故反转入队。底部牌垫到最底，unshift 累积。
+    // guanxingTop 头部即下一张待摸，故反转入队。底部牌按文本/协议顺序累积展示。
     if (toPosition === GUANXING_TOP_POSITION) {
-      guanxingTop = [...cardIds].reverse().concat(guanxingTop)
+      const cards = attachDetailsToGuanxingCards(
+        [...cardIds].reverse().map(guanxingCardFromId),
+        pendingGuanxingTopDetails.splice(0, cardIds.length)
+      )
+      guanxingTop = cards.concat(guanxingTop)
     } else {
-      guanxingBottom = guanxingBottom.concat(cardIds)
+      const cards = attachDetailsToGuanxingCards(
+        cardIds.map(guanxingCardFromId),
+        pendingGuanxingBottomDetails.splice(0, cardIds.length)
+      )
+      guanxingBottom = guanxingBottom.concat(cards)
     }
     guanxingAt = at
     return true
@@ -2394,7 +2553,16 @@ function buildExportPayload(reason: string): ExportPayload {
     seenExactCards: seenExactCards.slice(),
     exactCardStates: seenExactCards.slice(),
     ...(guanxingTop.length || guanxingBottom.length || guanxingPeekCount
-      ? { guanxing: { top: guanxingTop.slice(), bottom: guanxingBottom.slice(), peekCount: guanxingPeekCount, at: guanxingAt } }
+      ? {
+          guanxing: {
+            top: guanxingTop.map((card) => card.cardId),
+            bottom: guanxingBottom.map((card) => card.cardId),
+            topCards: guanxingTop.map(guanxingExportCard),
+            bottomCards: guanxingBottom.map(guanxingExportCard),
+            peekCount: guanxingPeekCount,
+            at: guanxingAt
+          }
+        }
       : {}),
     recentEvents: displayEvents.slice(-100),
     diagnostics: buildDiagnostics(),
@@ -2597,6 +2765,7 @@ function ingestUnredactedTextRecord(record: HookRecord, at: number): boolean {
     return changed
   }
 
+  changed = ingestGuanxingPlacementText(record.text, at) || changed
   const parsedEvents = parseLogInput([{ text: record.text, score: 1 }], "hook", deckProfile)
   const event = parsedEvents[0]
   if (!event) {

@@ -696,10 +696,12 @@
 
 .sgs-gx-top {
   color: #6fcf97;
+  cursor: help;
 }
 
 .sgs-gx-bottom {
   color: #7f8b97;
+  cursor: help;
 }
 
 .sgs-footer-stats button {
