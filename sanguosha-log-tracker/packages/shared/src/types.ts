@@ -52,7 +52,7 @@ export type OcrLogRecord = {
   text: string
   score?: number | undefined
   box?: unknown
-  source: "ocr" | "manual" | "mock"
+  source: "ocr" | "manual" | "mock" | "hook"
   createdAt: number
 }
 
@@ -62,6 +62,7 @@ export type DeckCardEntry = {
   type?: "basic" | "trick" | "equip"
   suit?: string
   rank?: string
+  description?: string
 }
 
 export type DeckProfile = {
@@ -79,8 +80,11 @@ export interface ParsedLogEvent {
   normalizedRawText: string
   playerName?: string | undefined
   targetName?: string | undefined
+  sourcePlayerName?: string | undefined
+  sourceZone?: string | undefined
   canonicalPlayerKey?: string | undefined
   canonicalTargetKey?: string | undefined
+  canonicalSourcePlayerKey?: string | undefined
   suspiciousPlayerName?: boolean | undefined
   action: CardEventAction
   cardName?: CardName | undefined
@@ -88,12 +92,13 @@ export interface ParsedLogEvent {
   suit?: string | undefined
   rank?: string | undefined
   confidence: number
-  source: "ocr" | "manual" | "mock"
+  source: "ocr" | "manual" | "mock" | "hook"
   status: CardEventStatus
   quality: ParseQuality
   autoAcceptable: boolean
-  impactCount?: 0 | 1 | undefined
+  impactCount?: number | undefined
   consumedKnownCard?: boolean | undefined
+  consumedKnownCardNames?: CardName[] | undefined
   cycleId?: number | undefined
   duplicate?: boolean | undefined
   supportStatus?: CardSupportStatus | undefined

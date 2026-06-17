@@ -14,6 +14,9 @@ function createEvent(partial: Partial<ParsedLogEvent>): ParsedLogEvent {
     targetName: partial.targetName,
     action: partial.action ?? "use",
     cardName: partial.cardName ?? "过河拆桥",
+    cardNames: partial.cardNames,
+    suit: partial.suit,
+    rank: partial.rank,
     confidence: partial.confidence ?? 0.99,
     source: partial.source ?? "manual",
     status: partial.status ?? "accepted",
@@ -21,6 +24,11 @@ function createEvent(partial: Partial<ParsedLogEvent>): ParsedLogEvent {
     autoAcceptable: partial.autoAcceptable ?? true,
     supportStatus: partial.supportStatus,
     note: partial.note,
+    impactCount: partial.impactCount,
+    consumedKnownCard: partial.consumedKnownCard,
+    consumedKnownCardNames: partial.consumedKnownCardNames,
+    sourcePlayerName: partial.sourcePlayerName,
+    sourceZone: partial.sourceZone,
     fingerprint: partial.fingerprint ?? partial.rawText ?? "黄月英对周泰（您）使用过河拆桥",
     createdAt: partial.createdAt ?? new Date().toISOString()
   }
@@ -167,6 +175,128 @@ describe("tracker", () => {
     expect(state.cycleSeenCounts["寒冰剑"]).toBe(1)
   })
 
+  it("counts all cards in an accepted multi-card discard", () => {
+    const state = applyEvent(
+      createInitialTrackerState(happyTwoVTwoDeckProfile),
+      createEvent({
+        id: "multi-discard",
+        rawText: "界华佗弃置杀♣8,闪♦J",
+        playerName: "界华佗",
+        action: "discard",
+        cardName: "杀",
+        cardNames: ["杀", "闪"]
+      })
+    )
+
+    expect(state.cycleSeenCounts["杀"]).toBe(1)
+    expect(state.cycleSeenCounts["闪"]).toBe(1)
+    expect(state.events.find((event) => event.id === "multi-discard")).toMatchObject({ impactCount: 2 })
+  })
+
+  it("moves known cards between players when gained from another public zone", () => {
+    let state = createInitialTrackerState(happyTwoVTwoDeckProfile)
+    state = applyEvent(
+      state,
+      createEvent({
+        id: "self-equip",
+        playerName: "简雍（您）",
+        action: "gainKnown",
+        cardName: "青龙偃月刀"
+      })
+    )
+    state = applyEvent(
+      state,
+      createEvent({
+        id: "shun",
+        rawText: "沮授从简雍(您)的装备区获得青龙偃月刀♠5",
+        playerName: "沮授",
+        targetName: "简雍（您）",
+        sourcePlayerName: "简雍（您）",
+        sourceZone: "装备区",
+        action: "gainKnown",
+        cardName: "青龙偃月刀"
+      })
+    )
+
+    expect(state.cycleSeenCounts["青龙偃月刀"]).toBe(1)
+    expect(state.knownCardsByPlayer["__self__"]?.["青龙偃月刀"]).toBeUndefined()
+    expect(state.knownCardsByPlayer["沮授"]?.["青龙偃月刀"]).toBe(1)
+    expect(state.events.find((event) => event.id === "shun")).toMatchObject({ impactCount: 0, consumedKnownCard: true })
+  })
+
+  it("uses the target player as the source when discarding another player's card", () => {
+    let state = createInitialTrackerState(happyTwoVTwoDeckProfile)
+    state = applyEvent(
+      state,
+      createEvent({
+        id: "self-known",
+        playerName: "简雍（您）",
+        action: "gainKnown",
+        cardName: "八卦阵"
+      })
+    )
+    state = applyEvent(
+      state,
+      createEvent({
+        id: "discard-other",
+        rawText: "简雍(您)弃置沮授的八卦阵♠2",
+        playerName: "简雍（您）",
+        targetName: "沮授",
+        sourcePlayerName: "沮授",
+        action: "discard",
+        cardName: "八卦阵"
+      })
+    )
+
+    expect(state.cycleSeenCounts["八卦阵"]).toBe(2)
+    expect(state.knownCardsByPlayer["__self__"]?.["八卦阵"]).toBe(1)
+    expect(state.events.find((event) => event.id === "discard-other")).toMatchObject({ impactCount: 1 })
+  })
+
+  it("rolls back multi-card discards while restoring consumed known cards", () => {
+    let state = createInitialTrackerState(happyTwoVTwoDeckProfile)
+    state = applyEvent(
+      state,
+      createEvent({
+        id: "known-flash",
+        playerName: "界张辽（您）",
+        action: "gainKnown",
+        cardName: "闪",
+        cardNames: ["闪"]
+      })
+    )
+    state = applyEvent(
+      state,
+      createEvent({
+        id: "pindian",
+        rawText: "界张辽（您）弃置闪♦J,杀♣4",
+        playerName: "界张辽（您）",
+        action: "discard",
+        cardName: "闪",
+        cardNames: ["闪", "杀"]
+      })
+    )
+
+    expect(state.cycleSeenCounts["闪"]).toBe(1)
+    expect(state.cycleSeenCounts["杀"]).toBe(1)
+    expect(state.knownCardsByPlayer["__self__"]?.["闪"]).toBeUndefined()
+    expect(state.events.find((event) => event.id === "pindian")).toMatchObject({
+      impactCount: 1,
+      consumedKnownCardNames: ["闪"]
+    })
+
+    const undone = rejectEvent(state, "pindian")
+    expect(undone.cycleSeenCounts["闪"]).toBe(1)
+    expect(undone.cycleSeenCounts["杀"]).toBe(0)
+    expect(undone.knownCardsByPlayer["__self__"]?.["闪"]).toBe(1)
+  })
+
+  it("includes club 4 slash in the happy 2v2 exact deck", () => {
+    expect(
+      happyTwoVTwoDeckProfile.cards.some((card) => card.name === "杀" && card.suit === "club" && card.rank === "4")
+    ).toBe(true)
+  })
+
   it("confirm reshuffle resets cycle counts and keeps history", () => {
     const state = applyEvent(createInitialTrackerState(oneVOneDeckProfile), createEvent({ id: "flash", cardName: "闪" }))
     const reshuffled = confirmReshuffle(state)
@@ -228,4 +358,3 @@ describe("tracker", () => {
     expect(wouldExceedCycleTotal(state, createEvent({ id: "lightning-3", playerName: "黄月英", cardName: "闪电", status: "pending" }))).toBe(true)
   })
 })
-

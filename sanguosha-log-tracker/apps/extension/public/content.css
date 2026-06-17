@@ -1,0 +1,816 @@
+#sgs-card-tracker-root {
+  position: fixed;
+  top: 76px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2147483647;
+  color: #e9edf2;
+  font-family: "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  pointer-events: none;
+}
+
+#sgs-card-tracker-root * {
+  box-sizing: border-box;
+  letter-spacing: 0;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+#sgs-card-tracker-root button {
+  font: inherit;
+}
+
+#sgs-known-hand-overlay-root {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  pointer-events: none;
+  color: #e9edf2;
+  font-family: "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+}
+
+#sgs-known-hand-overlay-root * {
+  box-sizing: border-box;
+  letter-spacing: 0;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.sgs-player-hand {
+  position: absolute;
+  max-width: 260px;
+  /* 容器本身透明无边框；常驻只剩徽标，牌面列表悬浮才出现 */
+  pointer-events: auto;
+}
+
+/* 常驻徽标：紧凑显示“名字 + 已知手牌数” */
+.sgs-player-hand-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid rgba(214, 164, 90, 0.42);
+  border-radius: 9px;
+  background: linear-gradient(180deg, rgba(12, 19, 26, 0.82), rgba(5, 9, 14, 0.8));
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.34);
+  color: #e6c17a;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 14px;
+  white-space: nowrap;
+  cursor: default;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.sgs-player-hand-badge b {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: rgba(214, 164, 90, 0.22);
+  color: #f1d9a6;
+  font-size: 10px;
+}
+
+.sgs-player-hand:hover .sgs-player-hand-badge {
+  border-color: rgba(214, 164, 90, 0.7);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+
+/* 牌面列表：默认隐藏，悬浮徽标时浮出 */
+.sgs-player-hand-popover {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 3px;
+  min-width: 96px;
+  border: 1px solid rgba(214, 164, 90, 0.36);
+  background: linear-gradient(180deg, rgba(12, 19, 26, 0.95), rgba(5, 9, 14, 0.93));
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  padding: 4px 5px 5px;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-2px);
+  transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+  z-index: 2;
+}
+
+.sgs-player-hand:hover .sgs-player-hand-popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.sgs-player-hand-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 92px;
+  color: #e6c17a;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+.sgs-player-hand-name b {
+  color: #9fb0bd;
+  font-size: 10px;
+}
+
+.sgs-player-hand-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-top: 3px;
+}
+
+.sgs-hand-card,
+.sgs-hand-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  width: 36px;
+  min-width: 36px;
+  height: 29px;
+  border: 1px solid rgba(62, 48, 33, 0.48);
+  background: linear-gradient(180deg, #ead9bd, #c7af8d);
+  color: #111820;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.48), 0 1px 2px rgba(0, 0, 0, 0.22);
+}
+
+.sgs-hand-card {
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 1px;
+}
+
+.sgs-hand-card-name {
+  max-width: 100%;
+  overflow: hidden;
+  color: #111820;
+  font-size: 11px;
+  line-height: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sgs-hand-card-meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-height: 10px;
+  color: #202832;
+  font-size: 10px;
+  line-height: 10px;
+}
+
+.sgs-hand-card-meta.is-empty {
+  display: none;
+}
+
+.sgs-hand-card.is-red {
+  color: #b52320;
+}
+
+.sgs-hand-card.is-red .sgs-hand-card-name,
+.sgs-hand-card.is-red .sgs-hand-card-meta {
+  color: #b52320;
+}
+
+.sgs-hand-more {
+  width: auto;
+  min-width: 36px;
+  height: 29px;
+  padding: 0 5px;
+  background: rgba(24, 34, 44, 0.92);
+  color: #d6a45a;
+  font-size: 11px;
+}
+
+.sgs-tracker-panel {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  width: min(var(--sgs-panel-width, 388px), calc(100vw - 16px));
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(112, 128, 143, 0.42);
+  background:
+    linear-gradient(180deg, rgba(20, 29, 38, 0.97), rgba(9, 15, 20, 0.98)),
+    rgba(9, 15, 20, 0.98);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  pointer-events: auto;
+}
+
+.sgs-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  width: 9px;
+  cursor: ew-resize;
+  z-index: 2;
+}
+
+.sgs-resize-handle::before {
+  position: absolute;
+  top: 44%;
+  left: 3px;
+  width: 2px;
+  height: 54px;
+  border-radius: 999px;
+  background: rgba(214, 164, 90, 0.28);
+  content: "";
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.sgs-resize-handle:hover::before {
+  opacity: 1;
+}
+
+.sgs-tracker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 56px;
+  border-bottom: 1px solid rgba(128, 143, 158, 0.28);
+  background: linear-gradient(180deg, rgba(24, 34, 44, 0.98), rgba(12, 20, 28, 0.98));
+  padding: 9px 14px 8px 12px;
+}
+
+.sgs-title-lockup {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+}
+
+.sgs-logo-mark {
+  width: 26px;
+  height: 30px;
+  color: #d6a45a;
+  font-family: KaiTi, STKaiti, serif;
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 30px;
+  text-align: center;
+  text-shadow: 0 0 12px rgba(214, 164, 90, 0.38);
+}
+
+.sgs-title-lockup h2 {
+  margin: 0;
+  color: #e8c580;
+  font-size: 18px;
+  font-weight: 900;
+  line-height: 1.15;
+}
+
+.sgs-title-lockup p {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 0;
+  color: #91a0ad;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.sgs-status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #76828c;
+}
+
+.sgs-status-dot.is-live {
+  background: #5ed56f;
+  box-shadow: 0 0 10px rgba(94, 213, 111, 0.58);
+}
+
+.sgs-count {
+  color: #efc779;
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.sgs-count small {
+  color: #8d98a4;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.sgs-count-waiting {
+  color: #8d98a4;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.sgs-toolbar {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 1px;
+  border-bottom: 1px solid rgba(128, 143, 158, 0.22);
+  background: rgba(128, 143, 158, 0.18);
+}
+
+.sgs-toolbar button,
+.sgs-tracker-tab {
+  border: 0;
+  background: linear-gradient(180deg, rgba(31, 43, 55, 0.96), rgba(15, 24, 32, 0.96));
+  color: #d7b16a;
+  cursor: pointer;
+}
+
+.sgs-toolbar button {
+  min-height: 30px;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.sgs-toolbar button:hover,
+.sgs-toolbar button.is-active,
+.sgs-tracker-tab:hover {
+  background: linear-gradient(180deg, rgba(69, 55, 30, 0.98), rgba(28, 23, 16, 0.98));
+  color: #ffd78a;
+}
+
+.sgs-deck-list {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: #7c7669 rgba(11, 17, 23, 0.9);
+  scrollbar-width: thin;
+}
+
+.sgs-known-zone {
+  border-bottom: 1px solid rgba(128, 143, 158, 0.24);
+  background: rgba(9, 15, 21, 0.82);
+}
+
+.sgs-known-zone-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  color: #d7c29c;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.sgs-known-zone-head strong {
+  color: #d6a45a;
+}
+
+.sgs-known-zone-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 132px;
+  overflow-y: auto;
+  padding: 2px 10px 7px;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.sgs-enemy-hand {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sgs-enemy-hand-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #e6c17a;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 15px;
+}
+
+.sgs-enemy-hand-name b {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: rgba(214, 164, 90, 0.22);
+  color: #f1d9a6;
+  font-size: 10px;
+}
+
+.sgs-enemy-hand-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.sgs-known-empty {
+  color: #697683;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.sgs-waiting-view {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 12px;
+  min-height: 220px;
+  padding: 28px 24px;
+  color: #9aa7b3;
+  text-align: center;
+}
+
+.sgs-waiting-status {
+  color: #e8c580;
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.sgs-waiting-detail {
+  max-width: 280px;
+  color: #8f9ba7;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.sgs-mode-row {
+  display: grid;
+  grid-template-columns: repeat(2, 64px);
+  gap: 8px;
+}
+
+.sgs-mode-row button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  border: 1px solid rgba(128, 143, 158, 0.34);
+  background: rgba(18, 27, 36, 0.88);
+  color: #a8b2bc;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.sgs-mode-row button:hover,
+.sgs-mode-row button.is-active {
+  border-color: rgba(214, 164, 90, 0.75);
+  background: rgba(67, 51, 25, 0.82);
+  color: #ffd78a;
+}
+
+.sgs-deck-section {
+  border-bottom: 1px solid rgba(128, 143, 158, 0.24);
+}
+
+.sgs-section-head {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  min-height: 31px;
+  border: 0;
+  background: linear-gradient(180deg, rgba(24, 36, 47, 0.98), rgba(16, 25, 34, 0.98));
+  color: #d7c29c;
+  padding: 0 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sgs-section-head span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.sgs-section-head strong {
+  color: #d6a45a;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.sgs-chevron {
+  color: #d6a45a;
+  font-size: 17px !important;
+}
+
+.sgs-section-body.is-closed {
+  display: none;
+}
+
+.sgs-card-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) 42px;
+  gap: 5px;
+  align-items: start;
+  min-height: 32px;
+  border-top: 1px solid rgba(128, 143, 158, 0.16);
+  background: rgba(16, 23, 31, 0.78);
+  padding: 5px 6px 5px 10px;
+}
+
+.sgs-tracker-panel.is-wide .sgs-card-row {
+  grid-template-columns: 132px minmax(0, 1fr) 48px;
+}
+
+.sgs-card-row:nth-child(even) {
+  background: rgba(13, 20, 28, 0.86);
+}
+
+.sgs-card-row.is-empty {
+  opacity: 0.46;
+}
+
+.sgs-card-name {
+  min-width: 0;
+  color: #d8dde2;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.sgs-card-name span {
+  display: inline-block;
+  max-width: 62px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+.sgs-tracker-panel.is-wide .sgs-card-name span {
+  max-width: 100px;
+}
+
+.sgs-card-name b {
+  color: #a7b0ba;
+  font-weight: 800;
+}
+
+.sgs-card-cells {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sgs-card-chip,
+.sgs-card-overflow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  width: 31px;
+  min-width: 31px;
+  max-width: 31px;
+  height: 22px;
+  border: 1px solid rgba(62, 48, 33, 0.42);
+  background: linear-gradient(180deg, #f1e2cb, #cfb999);
+  color: #0e1115;
+  font-family: "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58), 0 1px 2px rgba(0, 0, 0, 0.28);
+  cursor: pointer;
+}
+
+.sgs-card-chip span {
+  line-height: 1;
+}
+
+.sgs-card-chip.is-red {
+  color: #b52320;
+}
+
+.sgs-card-chip.is-seen {
+  border-color: rgba(40, 48, 56, 0.7);
+  background: linear-gradient(180deg, #8b918d, #4d5556);
+  color: #182027;
+  filter: grayscale(0.88) brightness(0.78);
+  opacity: 0.72;
+}
+
+.sgs-card-chip.is-player-visible {
+  border-color: rgba(214, 164, 90, 0.72);
+  background: linear-gradient(180deg, #d9d0bb, #8e836b);
+  filter: grayscale(0.35) brightness(0.9);
+  opacity: 0.86;
+}
+
+.sgs-card-chip.is-seen.is-red {
+  color: #461512;
+}
+
+.sgs-card-chip.is-pulsing {
+  animation: sgs-card-seen-pulse 1.1s ease-in-out 0s 2;
+}
+
+.sgs-suit-icon {
+  width: 9px;
+  height: 10px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
+.sgs-suit-symbol {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 9px;
+  height: 10px;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.sgs-card-overflow {
+  border-style: dashed;
+  background: rgba(45, 53, 61, 0.92);
+  color: #d7c29c;
+}
+
+.sgs-card-seen {
+  color: #74818c;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 22px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.sgs-tracker-footer {
+  border-top: 1px solid rgba(128, 143, 158, 0.24);
+  background: rgba(7, 12, 17, 0.92);
+}
+
+.sgs-footer-stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 6px 10px;
+  color: #8996a3;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.sgs-guanxing {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid rgba(128, 143, 158, 0.16);
+  background: rgba(214, 164, 90, 0.08);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.sgs-gx-head {
+  color: #d6a45a;
+  font-weight: 900;
+}
+
+.sgs-gx-top {
+  color: #6fcf97;
+}
+
+.sgs-gx-bottom {
+  color: #7f8b97;
+}
+
+.sgs-footer-stats button {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: #d6a45a;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.sgs-footer-stats button:hover {
+  color: #ffd78a;
+}
+
+.sgs-event-log {
+  max-height: 116px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-top: 1px solid rgba(128, 143, 158, 0.15);
+  scrollbar-color: #6f6658 rgba(7, 12, 17, 0.92);
+  scrollbar-width: thin;
+}
+
+.sgs-event-row {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 6px;
+  min-height: 23px;
+  padding: 4px 9px;
+  color: #aeb8c2;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.sgs-event-row time {
+  color: #6f7e8a;
+  font-variant-numeric: tabular-nums;
+}
+
+.sgs-event-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sgs-event-row.is-game-over span {
+  color: #efc779;
+}
+
+.sgs-event-row.is-redacted span {
+  color: #a7b0ba;
+}
+
+@keyframes sgs-card-seen-pulse {
+  0% {
+    filter: grayscale(0) brightness(1.15) sepia(0) hue-rotate(0deg);
+    box-shadow: 0 0 0 rgba(239, 68, 68, 0), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  }
+
+  42% {
+    filter: grayscale(0) brightness(1.38) sepia(1) hue-rotate(-32deg) saturate(4.2);
+    box-shadow: 0 0 14px rgba(239, 68, 68, 0.95), inset 0 0 0 1px rgba(255, 80, 80, 0.85);
+  }
+
+  100% {
+    filter: grayscale(0.88) brightness(0.78);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 1px 2px rgba(0, 0, 0, 0.28);
+  }
+}
+
+.sgs-empty {
+  padding: 12px 10px;
+  color: #697683;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.sgs-tracker-tab {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  width: 54px;
+  min-height: 86px;
+  border: 1px solid rgba(112, 128, 143, 0.42);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+  pointer-events: auto;
+}
+
+.sgs-tracker-tab span {
+  font-family: KaiTi, STKaiti, serif;
+  font-size: 26px;
+  font-weight: 900;
+}
+
+.sgs-tracker-tab b {
+  color: #e9edf2;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+@media (max-width: 900px) {
+  #sgs-card-tracker-root {
+    top: 64px;
+    right: 4px;
+    bottom: 4px;
+  }
+
+  .sgs-tracker-panel {
+    width: min(var(--sgs-panel-width, 360px), calc(100vw - 12px));
+  }
+}

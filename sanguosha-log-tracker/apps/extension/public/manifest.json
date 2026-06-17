@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "三国杀记牌器",
+  "version": "0.1.4",
+  "description": "基于页面公开日志事件的三国杀记牌器，替代截图 OCR 识别。",
+  "permissions": ["clipboardWrite", "scripting", "tabs"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "host_permissions": [
+    "https://web.sanguosha.com/*",
+    "https://*.sanguosha.com/*",
+    "http://127.0.0.1:18765/*",
+    "http://localhost:18765/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://web.sanguosha.com/*", "https://*.sanguosha.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["pageHook.js", "assets/*.png"],
+      "matches": ["https://web.sanguosha.com/*", "https://*.sanguosha.com/*"]
+    }
+  ]
+}

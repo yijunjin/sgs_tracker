@@ -29,6 +29,20 @@ describe("parseLogInput", () => {
     expect(event).toMatchObject({ action: "use", playerName: "郭嘉", cardName: "闪", quality: "strict" })
   })
 
+  it("maps the harmonized 借刀 label to 借刀杀人", () => {
+    const [event] = parseLogInput("刘协使用借刀♣Q", "manual", happyTwoVTwoDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "use",
+      playerName: "刘协",
+      cardName: "借刀杀人",
+      suit: "梅花",
+      rank: "Q",
+      quality: "strict",
+      autoAcceptable: true
+    })
+  })
+
   it("parses judge result public cards by name only", () => {
     const [event] = parseLogInput("周泰（您）的乐不思蜀判定结果是寒冰剑9", "manual", oneVOneDeckProfile)
 
@@ -52,8 +66,20 @@ describe("parseLogInput", () => {
     })
   })
 
-  it("keeps clean self draw pile gain strict", () => {
-    const [event] = parseLogInput("界孙坚（您）从摸牌堆获得闪电", "manual", happyTwoVTwoDeckProfile)
+  it("parses 洛神/再起 获得判定牌 as owner-visible gainKnown", () => {
+    const [event] = parseLogInput("甄姬获得判定牌青釭剑♠6", "manual", oneVOneDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "gainKnown",
+      playerName: "甄姬",
+      cardName: "青釭剑",
+      suit: "黑桃",
+      rank: "6",
+      quality: "strict"
+    })
+  })
+
+  it("keeps clean self draw pile gain strict", () => {    const [event] = parseLogInput("界孙坚（您）从摸牌堆获得闪电", "manual", happyTwoVTwoDeckProfile)
 
     expect(event).toMatchObject({
       action: "gainKnown",
@@ -201,5 +227,104 @@ describe("parseLogInput", () => {
     expect(events[1]).toMatchObject({ playerName: "曹操", action: "play", cardName: "闪" })
     expect(events[2]).toMatchObject({ playerName: "孙权", action: "discard", cardName: "桃" })
     expect(events[3]).toMatchObject({ playerName: "司马懿", action: "judge", suit: "黑桃", rank: "2", cardName: "八卦阵" })
+  })
+
+  it("parses comma-separated discarded cards as one multi-card event", () => {
+    const [event] = parseLogInput("界华佗弃置杀♣8,闪♦J", "manual", happyTwoVTwoDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "discard",
+      playerName: "界华佗",
+      cardName: "杀",
+      cardNames: ["杀", "闪"],
+      quality: "strict",
+      autoAcceptable: true
+    })
+    expect(event?.note).toContain("弃置多张牌")
+  })
+
+  it("parses pindian cards as discarded public cards", () => {
+    const [event] = parseLogInput(
+      "界荀彧与界张辽(您)拼点，界荀彧的拼点牌为闪电♥Q,界张辽(您)的拼点牌为铁索连环♠J,界荀彧赢",
+      "manual",
+      happyTwoVTwoDeckProfile
+    )
+
+    expect(event).toMatchObject({
+      action: "discard",
+      playerName: "界荀彧",
+      targetName: "界张辽(您)",
+      cardName: "闪电",
+      cardNames: ["闪电", "铁索连环"],
+      quality: "strict",
+      autoAcceptable: true
+    })
+    expect(event?.note).toContain("拼点公开并弃置多张牌")
+  })
+
+  it("parses cards gained from another player's equipment as known hand transfer", () => {
+    const [event] = parseLogInput("沮授从简雍(您)的装备区获得青龙偃月刀♠5", "manual", happyTwoVTwoDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "gainKnown",
+      playerName: "沮授",
+      targetName: "简雍（您）",
+      sourcePlayerName: "简雍（您）",
+      sourceZone: "装备区",
+      cardName: "青龙偃月刀",
+      quality: "strict",
+      autoAcceptable: true
+    })
+  })
+
+  it("parses discarding another player's card with that player as the source", () => {
+    const [event] = parseLogInput("简雍(您)弃置沮授的八卦阵♠2", "manual", happyTwoVTwoDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "discard",
+      playerName: "简雍（您）",
+      targetName: "沮授",
+      sourcePlayerName: "沮授",
+      cardName: "八卦阵",
+      quality: "strict",
+      autoAcceptable: true
+    })
+  })
+
+  it("parses recast cards as discarded public cards", () => {
+    const [event] = parseLogInput("简雍(您)重铸铁索连环♣J", "manual", happyTwoVTwoDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "discard",
+      playerName: "简雍（您）",
+      cardName: "铁索连环",
+      quality: "strict",
+      autoAcceptable: true,
+      note: "重铸牌进入弃牌堆"
+    })
+  })
+
+  it("parses skill discards as discarded public cards", () => {
+    const [event] = parseLogInput("孙权发动制衡，弃置杀♣8,闪♦J", "manual", happyTwoVTwoDeckProfile)
+
+    expect(event).toMatchObject({
+      action: "discard",
+      playerName: "孙权",
+      cardName: "杀",
+      cardNames: ["杀", "闪"],
+      quality: "strict",
+      autoAcceptable: true
+    })
+    expect(event?.note).toContain("制衡弃置多张牌")
+  })
+
+  it("ignores card description text for recast", () => {
+    const [event] = parseLogInput(
+      "出牌阶段，对一至两名角色使用。目标进入或解除“连环”状态。重铸：出牌阶段，你可以将此牌置入弃牌堆，然后摸一张牌。",
+      "manual",
+      happyTwoVTwoDeckProfile
+    )
+
+    expect(event).toMatchObject({ action: "ignore", quality: "ignored" })
   })
 })

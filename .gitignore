@@ -23,6 +23,16 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# SGS extension/debug captures
+.chrome-sgs-debug/
+.tmp-cdp/
+captures/
+cdp-*-summary.json
+laya-text-capture-*.json
+ws-binary-fingerprint-*.json
+sanguosha-log-tracker/apps/extension/dist.7z
+sanguosha-log-tracker/apps/extension/src/Untitled-*.json
+
 # API runtime data: OCR session reports, mined aliases, local user aliases.
 sanguosha-log-tracker/apps/api/data/
 

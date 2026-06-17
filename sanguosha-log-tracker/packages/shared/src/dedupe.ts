@@ -90,7 +90,7 @@ export function createSemanticEventKey(event: ParsedLogEvent): string | undefine
   const cycleId = event.cycleId ?? 0
   const playerKey = event.canonicalPlayerKey ?? canonicalPlayerKey(event.playerName) ?? "-"
   const targetKey = event.canonicalTargetKey ?? canonicalTargetKey(event.targetName) ?? "-"
-  const cardKey = event.action === "gainKnown" ? normalizeSemanticCardList(event) : event.cardName
+  const cardKey = normalizeSemanticCardList(event) ?? event.cardName
 
   if (!cardKey && event.action !== "convert") {
     return undefined

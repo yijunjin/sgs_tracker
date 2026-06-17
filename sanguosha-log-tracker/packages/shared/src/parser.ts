@@ -40,8 +40,18 @@ const LET_EQUIP_PATTERN = /^(?<player>.+?)让(?<target>.+?)装备(?<content>.+)$
 const DIRECT_ACTION_PATTERN = /^(?<player>.+?)(?<verb>使用|打出|弃置|装备)(?<content>.+)$/u
 const JUDGE_RESULT_PATTERN = /^(?<player>.+?)的(?<judgeName>.+?)判定结果是(?<content>.+)$/u
 const GAIN_KNOWN_PATTERN = /^(?<player>.+?)从(?<source>摸牌堆|五谷丰登)获得(?<content>.+)$/u
+// 洛神/再起等技能：「甄姬获得判定牌青釭剑♠6」「孟获获得判定牌闪♦10」。
+// 这类“获得判定牌”牌进入该玩家手牌且对我可见（判定结果公开），应归该玩家的已见手牌。
+const JUDGE_CARD_GAIN_PATTERN = /^(?<player>.+?)获得判定牌(?<content>.+)$/u
+const REGION_GAIN_PATTERN = /^(?<player>.+?)从(?<target>.+?)的(?<zone>手牌区|装备区|判定区|手牌|装备|判定牌)获得(?<content>.+)$/u
+const POSSESSIVE_DISCARD_PATTERN = /^(?<player>.+?)弃置(?<target>.+?)的(?<content>.+)$/u
+const RECAST_PATTERN = /^(?<player>.+?)重铸了?(?<content>.+)$/u
+const SKILL_DISCARD_PATTERN = /^(?<player>.+?)发动(?<skill>[^，,。]*?)[，,]?(?:弃置了?|重铸了?)(?<content>.+)$/u
+const PINDIAN_PATTERN = /^(?<player>.+?)与(?<target>.+?)拼点[，,](?<content>.+)$/u
+const PINDIAN_CARD_PATTERN = /的拼点牌为(?<content>[^，,]+)/gu
 const DRAW_NUMBER_PATTERN = /^(?<player>.+?)(?:从摸牌堆)?获得[1-9]\d*张牌$/u
 const SUIT_RANK_CARD_PATTERN = /^(?<suit>黑桃|红桃|梅花|方片|方块)?(?<rank>A|10|[2-9JQK])?\s*(?<card>.+)$/u
+const SYMBOL_SUFFIX_CARD_PATTERN = /^(?<card>.+?)(?<suit>[♠♥♣♦])(?<rank>A|10|[2-9JQK])?$/u
 const SUIT_ONLY_PATTERN = /(黑桃|红桃|梅花|方片|方块)(A|10|[2-9JQK])?$/u
 
 const IGNORE_PATTERNS = [
@@ -237,10 +247,11 @@ function resolveCardDetail(
   deckProfile: DeckProfile
 ): ResolvedCardDetail {
   const normalizedContent = normalizeText(content)
-  const suitRankMatch = normalizedContent.match(SUIT_RANK_CARD_PATTERN)
-  const suit = normalizeSuit(suitRankMatch?.groups?.suit)
-  const rank = suitRankMatch?.groups?.rank
-  const cardLabel = suitRankMatch?.groups?.card ?? normalizedContent
+  const symbolSuffixMatch = normalizedContent.match(SYMBOL_SUFFIX_CARD_PATTERN)
+  const suitRankMatch = symbolSuffixMatch ? undefined : normalizedContent.match(SUIT_RANK_CARD_PATTERN)
+  const suit = normalizeSuit(symbolSuffixMatch?.groups?.suit ?? suitRankMatch?.groups?.suit)
+  const rank = symbolSuffixMatch?.groups?.rank ?? suitRankMatch?.groups?.rank
+  const cardLabel = symbolSuffixMatch?.groups?.card ?? suitRankMatch?.groups?.card ?? normalizedContent
   const normalizedCardLabel = normalizeText(cardLabel)
   const directKnownCardName = isKnownCardName(normalizedCardLabel) ? normalizedCardLabel : normalizeCardName(normalizedCardLabel)
   const directDeckCardName = deckProfile.cards.some((card) => card.name === normalizedCardLabel) ? normalizedCardLabel : undefined
@@ -271,6 +282,9 @@ function shouldIgnore(normalizedText: string): boolean {
   if (isChooseGeneralLine(normalizedText)) {
     return true
   }
+  if (/^出牌阶段/u.test(normalizedText) && /(目标|角色|此牌|置入弃牌堆|摸一张牌)/u.test(normalizedText)) {
+    return true
+  }
   if (GAIN_KNOWN_PATTERN.test(normalizedText) && !DRAW_NUMBER_PATTERN.test(normalizedText)) {
     return false
   }
@@ -297,13 +311,49 @@ function findAllKnownCardNames(text: string): string[] {
 }
 
 function findGainKnownCardDetails(content: string, deckProfile: DeckProfile): ResolvedCardDetail[] {
-  const normalizedContent = normalizeText(content)
-  const segments = normalizedContent
+  return findDelimitedCardDetails(content, deckProfile)
+}
+
+function findDelimitedCardDetails(content: string, deckProfile: DeckProfile): ResolvedCardDetail[] {
+  const rawSegments = content
     .split(/[，,、]/u)
     .map((segment) => segment.trim())
     .filter(Boolean)
 
-  return (segments.length > 0 ? segments : [normalizedContent]).map((segment) => resolveCardDetail(segment, deckProfile))
+  return (rawSegments.length > 0 ? rawSegments : [normalizeText(content)]).map((segment) => resolveCardDetail(segment, deckProfile))
+}
+
+function supportedCardNamesFromDetails(details: ResolvedCardDetail[], deckProfile: DeckProfile): CardName[] {
+  return details
+    .map((detail) => detail.cardName)
+    .filter((cardName): cardName is CardName => Boolean(cardName && isCardInDeck(deckProfile, cardName)))
+}
+
+function hasPartialCardMatch(details: ResolvedCardDetail[]): boolean {
+  return details.some((item) => item.cardName && item.matchType && item.matchType !== "exact")
+}
+
+function hasUnresolvedCardDetail(details: ResolvedCardDetail[]): boolean {
+  return details.some((item) => !item.cardName)
+}
+
+function firstDetailOrFallback(details: ResolvedCardDetail[], content: string, deckProfile: DeckProfile): ResolvedCardDetail {
+  return details[0] ?? resolveCardDetail(content, deckProfile)
+}
+
+function createMultiCardNote(actionLabel: string, cardNames: CardName[], fallback?: string): string | undefined {
+  if (cardNames.length > 1) {
+    return `${actionLabel}多张牌：${cardNames.join("、")}`
+  }
+  return fallback
+}
+
+function findPindianCardDetails(content: string, deckProfile: DeckProfile): ResolvedCardDetail[] {
+  const details = [...content.matchAll(PINDIAN_CARD_PATTERN)]
+    .map((match) => match.groups?.content?.trim())
+    .filter((segment): segment is string => Boolean(segment))
+    .map((segment) => resolveCardDetail(segment, deckProfile))
+  return details.length > 0 ? details : findDelimitedCardDetails(content, deckProfile)
 }
 
 function hasConflictingActionKeywords(text: string): boolean {
@@ -373,9 +423,10 @@ function parseSingleLine(
 
   const gainKnownMatch = normalizedText.match(GAIN_KNOWN_PATTERN)
   if (gainKnownMatch?.groups) {
+    const rawGainKnownMatch = rawText.match(GAIN_KNOWN_PATTERN)
     const playerName = gainKnownMatch.groups.player
-    const sourceName = gainKnownMatch.groups.source ?? "摸牌堆"
-    const content = gainKnownMatch.groups.content ?? ""
+    const sourceName = rawGainKnownMatch?.groups?.source ?? gainKnownMatch.groups.source ?? "摸牌堆"
+    const content = rawGainKnownMatch?.groups?.content ?? gainKnownMatch.groups.content ?? ""
     const gainDetails = findGainKnownCardDetails(content, deckProfile)
     const cardNames = gainDetails
       .map((detail) => detail.cardName)
@@ -420,6 +471,197 @@ function parseSingleLine(
         },
         quality,
         quality === "strict"
+      ),
+      deckProfile
+    )
+  }
+
+  const judgeCardGainMatch = normalizedText.match(JUDGE_CARD_GAIN_PATTERN)
+  if (judgeCardGainMatch?.groups) {
+    const rawJudgeCardGainMatch = rawText.match(JUDGE_CARD_GAIN_PATTERN)
+    const content = rawJudgeCardGainMatch?.groups?.content ?? judgeCardGainMatch.groups.content ?? ""
+    const details = findGainKnownCardDetails(content, deckProfile)
+    const cardNames = supportedCardNamesFromDetails(details, deckProfile)
+    const detail = firstDetailOrFallback(details, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(details)
+    const hasUnresolved = hasUnresolvedCardDetail(details)
+    const playerName = judgeCardGainMatch.groups.player
+    const isStrict = cardNames.length > 0 && !hasUnresolved && !hasPartialMatch && hasPlayerName(playerName)
+
+    return applyDeckSupport(
+      withQuality(
+        {
+          ...base,
+          playerName,
+          action: "gainKnown",
+          cardName: cardNames[0] ?? detail.cardName,
+          cardNames,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: createMultiCardNote("获得判定牌", cardNames, detail.cardName ? "获得判定牌（公开），已加入获得者已知手牌。" : detail.note)
+        },
+        isStrict ? "strict" : "ambiguous"
+      ),
+      deckProfile
+    )
+  }
+
+  const regionGainMatch = normalizedText.match(REGION_GAIN_PATTERN)
+  if (regionGainMatch?.groups) {
+    const rawRegionGainMatch = rawText.match(REGION_GAIN_PATTERN)
+    const content = rawRegionGainMatch?.groups?.content ?? regionGainMatch.groups.content ?? ""
+    const details = findGainKnownCardDetails(content, deckProfile)
+    const cardNames = supportedCardNamesFromDetails(details, deckProfile)
+    const detail = firstDetailOrFallback(details, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(details)
+    const hasUnresolved = hasUnresolvedCardDetail(details)
+    const playerName = regionGainMatch.groups.player
+    const targetName = regionGainMatch.groups.target
+    const sourceZone = regionGainMatch.groups.zone
+    const isStrict =
+      cardNames.length > 0 &&
+      !hasUnresolved &&
+      !hasPartialMatch &&
+      hasPlayerName(playerName) &&
+      hasPlayerName(targetName)
+
+    return applyDeckSupport(
+      withQuality(
+        {
+          ...base,
+          playerName,
+          targetName,
+          sourcePlayerName: targetName,
+          sourceZone,
+          action: "gainKnown",
+          cardName: cardNames[0] ?? detail.cardName,
+          cardNames,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: createMultiCardNote(`从${targetName}的${sourceZone}获得`, cardNames, detail.cardName ? `从${targetName}的${sourceZone}获得公开牌，已加入获得者已知手牌。` : detail.note)
+        },
+        isStrict ? "strict" : "ambiguous"
+      ),
+      deckProfile
+    )
+  }
+
+  const pindianMatch = rawText.match(PINDIAN_PATTERN) ?? normalizedText.match(PINDIAN_PATTERN)
+  if (pindianMatch?.groups) {
+    const content = pindianMatch.groups.content ?? ""
+    const pindianDetails = findPindianCardDetails(content, deckProfile)
+    const cardNames = supportedCardNamesFromDetails(pindianDetails, deckProfile)
+    const detail = firstDetailOrFallback(pindianDetails, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(pindianDetails)
+    const hasUnresolved = hasUnresolvedCardDetail(pindianDetails)
+    const isStrict =
+      cardNames.length > 0 &&
+      !hasUnresolved &&
+      !hasPartialMatch &&
+      hasPlayerName(pindianMatch.groups.player) &&
+      hasPlayerName(pindianMatch.groups.target)
+
+    return applyDeckSupport(
+      withQuality(
+        {
+          ...base,
+          playerName: pindianMatch.groups.player,
+          targetName: pindianMatch.groups.target,
+          action: "discard",
+          cardName: cardNames[0] ?? detail.cardName,
+          cardNames,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: createMultiCardNote("拼点公开并弃置", cardNames, detail.cardName ? "拼点牌公开并进入弃牌堆" : detail.note)
+        },
+        isStrict ? "strict" : "ambiguous"
+      ),
+      deckProfile
+    )
+  }
+
+  const recastMatch = normalizedText.match(RECAST_PATTERN)
+  if (recastMatch?.groups) {
+    const rawRecastMatch = rawText.match(RECAST_PATTERN)
+    const content = rawRecastMatch?.groups?.content ?? recastMatch.groups.content ?? ""
+    const details = findDelimitedCardDetails(content, deckProfile)
+    const cardNames = supportedCardNamesFromDetails(details, deckProfile)
+    const detail = firstDetailOrFallback(details, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(details)
+    const hasUnresolved = hasUnresolvedCardDetail(details)
+    const isStrict =
+      cardNames.length > 0 &&
+      !hasUnresolved &&
+      !hasPartialMatch &&
+      hasPlayerName(recastMatch.groups.player) &&
+      (details.length > 1 || !isSuspiciousContent(content))
+
+    return applyDeckSupport(
+      withQuality(
+        {
+          ...base,
+          playerName: recastMatch.groups.player,
+          action: "discard",
+          cardName: cardNames[0] ?? detail.cardName,
+          cardNames,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: createMultiCardNote("重铸", cardNames, detail.cardName ? "重铸牌进入弃牌堆" : detail.note)
+        },
+        isStrict ? "strict" : "ambiguous"
+      ),
+      deckProfile
+    )
+  }
+
+  const skillDiscardMatch = normalizedText.match(SKILL_DISCARD_PATTERN)
+  if (skillDiscardMatch?.groups) {
+    const rawSkillDiscardMatch = rawText.match(SKILL_DISCARD_PATTERN)
+    const content = rawSkillDiscardMatch?.groups?.content ?? skillDiscardMatch.groups.content ?? ""
+    const details = findDelimitedCardDetails(content, deckProfile)
+    const cardNames = supportedCardNamesFromDetails(details, deckProfile)
+    const detail = firstDetailOrFallback(details, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(details)
+    const hasUnresolved = hasUnresolvedCardDetail(details)
+    const isStrict =
+      cardNames.length > 0 &&
+      !hasUnresolved &&
+      !hasPartialMatch &&
+      hasPlayerName(skillDiscardMatch.groups.player) &&
+      (details.length > 1 || !isSuspiciousContent(content))
+
+    return applyDeckSupport(
+      withQuality(
+        {
+          ...base,
+          playerName: skillDiscardMatch.groups.player,
+          action: "discard",
+          cardName: cardNames[0] ?? detail.cardName,
+          cardNames,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: createMultiCardNote(
+            skillDiscardMatch.groups.skill ? `${skillDiscardMatch.groups.skill}弃置` : "技能弃置",
+            cardNames,
+            detail.cardName ? "技能弃置牌进入弃牌堆" : detail.note
+          )
+        },
+        isStrict ? "strict" : "ambiguous"
       ),
       deckProfile
     )
@@ -482,22 +724,34 @@ function parseSingleLine(
 
   const bracketMatch = normalizedText.match(BRACKETED_CARD_PATTERN)
   if (bracketMatch?.groups) {
-    const detail = resolveCardDetail(bracketMatch.groups.content ?? "", deckProfile)
+    const rawBracketMatch = rawText.match(BRACKETED_CARD_PATTERN)
+    const content = rawBracketMatch?.groups?.content ?? bracketMatch.groups.content ?? ""
+    const details = findDelimitedCardDetails(content, deckProfile)
+    const cardNames = supportedCardNamesFromDetails(details, deckProfile)
+    const detail = firstDetailOrFallback(details, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(details)
+    const hasUnresolved = hasUnresolvedCardDetail(details)
+    const isStrict =
+      cardNames.length > 0 &&
+      !hasUnresolved &&
+      !hasPartialMatch &&
+      hasPlayerName(bracketMatch.groups.player)
     return applyDeckSupport(
       withQuality(
         {
           ...base,
           playerName: bracketMatch.groups.player,
           action: actionFromVerb(bracketMatch.groups.verb ?? ""),
-          cardName: detail.cardName,
+          cardName: cardNames[0] ?? detail.cardName,
+          cardNames,
           suit: detail.suit,
           rank: detail.rank,
           confidence,
           source,
           status: "pending",
-          note: detail.note
+          note: createMultiCardNote("公开", cardNames, detail.note)
         },
-        detail.cardName && detail.matchType === "exact" && hasPlayerName(bracketMatch.groups.player) ? "strict" : "ambiguous"
+        isStrict ? "strict" : "ambiguous"
       ),
       deckProfile
     )
@@ -505,7 +759,19 @@ function parseSingleLine(
 
   const letEquipMatch = normalizedText.match(LET_EQUIP_PATTERN)
   if (letEquipMatch?.groups) {
-    const detail = resolveCardDetail(letEquipMatch.groups.content ?? "", deckProfile)
+    const rawLetEquipMatch = rawText.match(LET_EQUIP_PATTERN)
+    const content = rawLetEquipMatch?.groups?.content ?? letEquipMatch.groups.content ?? ""
+    const details = findDelimitedCardDetails(content, deckProfile)
+    const cardNames = supportedCardNamesFromDetails(details, deckProfile)
+    const detail = firstDetailOrFallback(details, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(details)
+    const hasUnresolved = hasUnresolvedCardDetail(details)
+    const isStrict =
+      cardNames.length > 0 &&
+      !hasUnresolved &&
+      !hasPartialMatch &&
+      hasPlayerName(letEquipMatch.groups.player) &&
+      hasPlayerName(letEquipMatch.groups.target)
     return applyDeckSupport(
       withQuality(
         {
@@ -513,15 +779,16 @@ function parseSingleLine(
           playerName: letEquipMatch.groups.player,
           targetName: letEquipMatch.groups.target,
           action: "equip",
-          cardName: detail.cardName,
+          cardName: cardNames[0] ?? detail.cardName,
+          cardNames,
           suit: detail.suit,
           rank: detail.rank,
           confidence,
           source,
           status: "pending",
-          note: detail.note
+          note: createMultiCardNote("装备", cardNames, detail.note)
         },
-        detail.cardName && detail.matchType === "exact" && hasPlayerName(letEquipMatch.groups.player) && hasPlayerName(letEquipMatch.groups.target) ? "strict" : "ambiguous"
+        isStrict ? "strict" : "ambiguous"
       ),
       deckProfile
     )
@@ -529,14 +796,20 @@ function parseSingleLine(
 
   const targetUseMatch = normalizedText.match(TARGET_USE_PATTERN)
   if (targetUseMatch?.groups) {
-    const content = targetUseMatch.groups.content ?? ""
-    const detail = resolveCardDetail(content, deckProfile)
+    const rawTargetUseMatch = rawText.match(TARGET_USE_PATTERN)
+    const content = rawTargetUseMatch?.groups?.content ?? targetUseMatch.groups.content ?? ""
+    const details = findDelimitedCardDetails(content, deckProfile)
+    const cardNames = supportedCardNamesFromDetails(details, deckProfile)
+    const detail = firstDetailOrFallback(details, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(details)
+    const hasUnresolved = hasUnresolvedCardDetail(details)
     const isStrict =
-      Boolean(detail.cardName) &&
-      detail.matchType === "exact" &&
+      cardNames.length > 0 &&
+      !hasUnresolved &&
+      !hasPartialMatch &&
       hasPlayerName(targetUseMatch.groups.player) &&
       hasPlayerName(targetUseMatch.groups.target) &&
-      !isSuspiciousContent(content)
+      (details.length > 1 || !isSuspiciousContent(content))
     return applyDeckSupport(
       withQuality(
         {
@@ -544,13 +817,55 @@ function parseSingleLine(
           playerName: targetUseMatch.groups.player,
           targetName: targetUseMatch.groups.target,
           action: "use",
-          cardName: detail.cardName,
+          cardName: cardNames[0] ?? detail.cardName,
+          cardNames,
           suit: detail.suit,
           rank: detail.rank,
           confidence,
           source,
           status: "pending",
-          note: detail.note
+          note: createMultiCardNote("使用", cardNames, detail.note)
+        },
+        isStrict ? "strict" : "ambiguous"
+      ),
+      deckProfile
+    )
+  }
+
+  const possessiveDiscardMatch = normalizedText.match(POSSESSIVE_DISCARD_PATTERN)
+  if (possessiveDiscardMatch?.groups) {
+    const rawPossessiveDiscardMatch = rawText.match(POSSESSIVE_DISCARD_PATTERN)
+    const content = rawPossessiveDiscardMatch?.groups?.content ?? possessiveDiscardMatch.groups.content ?? ""
+    const details = findDelimitedCardDetails(content, deckProfile)
+    const cardNames = supportedCardNamesFromDetails(details, deckProfile)
+    const detail = firstDetailOrFallback(details, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(details)
+    const hasUnresolved = hasUnresolvedCardDetail(details)
+    const playerName = possessiveDiscardMatch.groups.player
+    const targetName = possessiveDiscardMatch.groups.target
+    const isStrict =
+      cardNames.length > 0 &&
+      !hasUnresolved &&
+      !hasPartialMatch &&
+      hasPlayerName(playerName) &&
+      hasPlayerName(targetName)
+
+    return applyDeckSupport(
+      withQuality(
+        {
+          ...base,
+          playerName,
+          targetName,
+          sourcePlayerName: targetName,
+          action: "discard",
+          cardName: cardNames[0] ?? detail.cardName,
+          cardNames,
+          suit: detail.suit,
+          rank: detail.rank,
+          confidence,
+          source,
+          status: "pending",
+          note: createMultiCardNote(`弃置${targetName}的牌`, cardNames, detail.note)
         },
         isStrict ? "strict" : "ambiguous"
       ),
@@ -560,23 +875,33 @@ function parseSingleLine(
 
   const directMatch = normalizedText.match(DIRECT_ACTION_PATTERN)
   if (directMatch?.groups) {
-    const content = directMatch.groups.content ?? ""
-    const detail = resolveCardDetail(content, deckProfile)
+    const rawDirectMatch = rawText.match(DIRECT_ACTION_PATTERN)
+    const content = rawDirectMatch?.groups?.content ?? directMatch.groups.content ?? ""
+    const details = findDelimitedCardDetails(content, deckProfile)
+    const cardNames = supportedCardNamesFromDetails(details, deckProfile)
+    const detail = firstDetailOrFallback(details, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(details)
+    const hasUnresolved = hasUnresolvedCardDetail(details)
     const isStrict =
-      Boolean(detail.cardName) && detail.matchType === "exact" && hasPlayerName(directMatch.groups.player) && !isSuspiciousContent(content)
+      cardNames.length > 0 &&
+      !hasUnresolved &&
+      !hasPartialMatch &&
+      hasPlayerName(directMatch.groups.player) &&
+      (details.length > 1 || !isSuspiciousContent(content))
     return applyDeckSupport(
       withQuality(
         {
           ...base,
           playerName: directMatch.groups.player,
           action: actionFromVerb(directMatch.groups.verb ?? ""),
-          cardName: detail.cardName,
+          cardName: cardNames[0] ?? detail.cardName,
+          cardNames,
           suit: detail.suit,
           rank: detail.rank,
           confidence,
           source,
           status: "pending",
-          note: detail.note
+          note: createMultiCardNote(actionFromVerb(directMatch.groups.verb ?? "") === "discard" ? "弃置" : "公开", cardNames, detail.note)
         },
         isStrict ? "strict" : "ambiguous"
       ),

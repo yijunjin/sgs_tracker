@@ -72,6 +72,19 @@ importers:
         specifier: ^7.8.1
         version: 7.8.2
 
+  apps/extension:
+    dependencies:
+      '@slt/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+      vite:
+        specifier: ^5.4.14
+        version: 5.4.21(@types/node@22.19.19)(lightningcss@1.32.0)
+
   apps/web:
     dependencies:
       '@paddleocr/paddleocr-js':

@@ -25,14 +25,21 @@ const textAliasMap = new Map<string, string>([
   ["水淹七车", "水淹七军"]
 ])
 
-const cardAliasMap = new Map<string, string>([["挑", "桃"]])
+const cardAliasMap = new Map<string, string>([
+  ["挑", "桃"],
+  ["借刀", "借刀杀人"]
+])
 
 const suitAliasMap = new Map<string, string>([
   ["黑桃", "黑桃"],
   ["红桃", "红桃"],
   ["梅花", "梅花"],
   ["方片", "方片"],
-  ["方块", "方片"]
+  ["方块", "方片"],
+  ["♠", "黑桃"],
+  ["♥", "红桃"],
+  ["♣", "梅花"],
+  ["♦", "方片"]
 ])
 
 function toHalfWidth(input: string): string {
