@@ -1,10 +1,15 @@
+import vue from "@vitejs/plugin-vue"
 import { defineConfig } from "vite"
 import { cpSync, existsSync } from "node:fs"
 import { resolve } from "node:path"
 
 export default defineConfig({
   publicDir: "public",
+  define: {
+    "process.env.NODE_ENV": JSON.stringify("production")
+  },
   plugins: [
+    vue(),
     {
       name: "copy-extension-assets",
       writeBundle() {

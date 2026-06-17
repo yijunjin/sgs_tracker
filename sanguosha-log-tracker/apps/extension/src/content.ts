@@ -19,6 +19,21 @@ import {
   type SeatRosterEntry,
   type TrackerState
 } from "@slt/shared"
+import { createApp, type App as VueApp } from "vue"
+import TrackerApp from "./App.vue"
+import trackerStyles from "./content.css?raw"
+import {
+  replaceTrackerSnapshot,
+  trackerActions,
+  trackerStore,
+  type CardChipView,
+  type CardGroupView,
+  type EnemyHandView,
+  type EnemyKnownCardView,
+  type EventLogRowView,
+  type GuanxingView,
+  type TrackerSnapshot
+} from "./trackerStore"
 
 type HookRecord = {
   at: number
@@ -188,9 +203,6 @@ let drawPileRemainingSource = ""
 // 中途接入旁观（未收到开局 52 张牌表）时为 false，此时累加值仅供参考、不可信，UI 标注“未校准”。
 let drawPileCalibrated = false
 let midGameBaseline = false
-let collapsed = false
-let logCollapsed = loadBoolean(LOG_COLLAPSED_STORAGE_KEY, false)
-let panelWidth = loadNumber(PANEL_WIDTH_STORAGE_KEY, 388)
 let renderQueued = false
 let collectorQueued = false
 let lastCollectorPostAt = 0
@@ -199,29 +211,18 @@ let heartbeatTimer = 0
 let lastRenderStateSignature = ""
 let handOverlayQueued = false
 let lastHandOverlayRenderAt = 0
+let vueApp: VueApp<Element> | undefined
 
-let openGroups: Record<string, boolean> = {
-  basic: true,
-  trick: true,
-  equip: true
-}
+trackerStore.ui.logCollapsed = loadBoolean(LOG_COLLAPSED_STORAGE_KEY, false)
+trackerStore.ui.panelWidth = loadNumber(PANEL_WIDTH_STORAGE_KEY, 388)
+const openGroups: Record<string, boolean> = trackerStore.ui.openGroups
 
-const status = {
-  listening: true,
-  hookVersion: "",
-  lastRecordAt: 0,
-  protocolCount: 0,
-  textCount: 0,
-  gameOverCount: 0,
-  redactedCount: 0,
-  reshuffleCount: 0,
-  lastGameOverAt: 0
-}
+const status = trackerStore.state.status
 
 let extensionContextValid = true
 
-const displayEvents: DisplayEvent[] = []
-const seenExactCards: ExactSeenCard[] = []
+const displayEvents = trackerStore.state.displayEvents as DisplayEvent[]
+const seenExactCards = trackerStore.state.seenExactCards as ExactSeenCard[]
 const recentHookRecords: DiagnosticHookRecord[] = []
 const recentRawHookRecords: DiagnosticHookRecord[] = []
 const recentRawTexts: string[] = []
@@ -405,15 +406,6 @@ function runtimeUrl(path: string): string {
   }
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;")
-}
-
 function cardShortName(name: string): string {
   const map: Record<string, string> = {
     杀: "杀",
@@ -509,14 +501,6 @@ function cardChipLabel(card: DeckCardEntry): string {
     return `${card.rank ?? ""}${suitSymbol(card.suit)}`
   }
   return cardShortName(card.name)
-}
-
-function renderSuitIcon(suit: string | undefined): string {
-  const url = suitAssetUrl(suit)
-  if (!url) {
-    return suit ? `<span class="sgs-suit-symbol">${escapeHtml(suitSymbol(suit))}</span>` : ""
-  }
-  return `<img class="sgs-suit-icon" src="${escapeHtml(url)}" alt="${escapeHtml(suitSymbol(suit))}" />`
 }
 
 function cardFullLabel(card: Pick<DeckCardEntry, "name" | "rank" | "suit">): string {
@@ -843,27 +827,6 @@ function drawPileRemainingLabel(): string {
   }
   // 中途接入未校准时，数字仅供参考，加 ~ 前缀提示不可信。
   return drawPileCalibrated ? String(drawPileRemaining) : `~${drawPileRemaining}`
-}
-
-// 观星控底信息条：协议负责位置和数量；页面文本若暴露牌面，则补到 tooltip。
-// 顶部牌随摸牌出列，全部摸完则自动消失；底部牌垫底，本轮一般保留至洗牌。
-function renderGuanxing(): string {
-  const topCount = guanxingTop.length
-  const bottomCount = guanxingBottom.length
-  if (topCount === 0 && bottomCount === 0) {
-    return ""
-  }
-  const parts: string[] = []
-  if (topCount > 0) {
-    const topTip = guanxingCardsTip("你观星控到牌堆顶、尚未被摸走的牌", guanxingTop, "按摸牌顺序排列，1 即下一张摸牌")
-    parts.push(`<span class="sgs-gx-top" title="${escapeHtml(topTip)}">顶 ${topCount} 张待摸</span>`)
-  }
-  if (bottomCount > 0) {
-    const bottomTip = guanxingCardsTip("你观星垫到牌堆底的牌", guanxingBottom, "本轮一般摸不到，洗牌后失效")
-    parts.push(`<span class="sgs-gx-bottom" title="${escapeHtml(bottomTip)}">底 ${bottomCount} 张垫底</span>`)
-  }
-  const tip = `观星控底：查看过 ${guanxingPeekCount} 张；悬浮顶/底数字可看已捕获牌面`
-  return `<div class="sgs-guanxing" title="${escapeHtml(tip)}"><span class="sgs-gx-head">观星控底</span>${parts.join("")}</div>`
 }
 
 function formatClock(timestamp: number): string {
@@ -1939,18 +1902,21 @@ function fallbackVariant(card: DeckCardRow, index: number): DeckCardEntry {
   }
 }
 
-function renderChip(card: DeckCardEntry, state: "public" | "player-visible" | "equip" | "remaining", index: number, pulsing: boolean): string {
-  const label = escapeHtml(card.rank || cardChipLabel(card))
-  const redClass = isRedSuit(card.suit) ? " is-red" : ""
-  const seenClass = state === "public" || state === "player-visible" || state === "equip" ? " is-seen" : ""
-  const playerClass = state === "player-visible" ? " is-player-visible" : ""
-  const pulseClass = state !== "remaining" && pulsing ? " is-pulsing" : ""
+function chipView(card: DeckCardEntry, state: "public" | "player-visible" | "equip" | "remaining", index: number, pulsing: boolean): CardChipView {
   const zoneName = state === "public" ? "公开区" : state === "player-visible" ? "玩家已见" : state === "equip" ? "装备区" : "未见"
-  const title = escapeHtml(cardTooltip(card, state === "player-visible" ? "玩家已见" : state === "remaining" ? "未见" : "公开区"))
-  return `<span class="sgs-card-chip${seenClass}${playerClass}${redClass}${pulseClass}" title="${title} · ${zoneName} #${index + 1}">${renderSuitIcon(card.suit)}<span>${label}</span></span>`
+  return {
+    key: `${card.name}:${card.suit ?? ""}:${card.rank ?? ""}:${index}:${state}`,
+    label: card.rank || cardChipLabel(card),
+    title: `${cardTooltip(card, state === "player-visible" ? "玩家已见" : state === "remaining" ? "未见" : "公开区")} · ${zoneName} #${index + 1}`,
+    suitIconUrl: suitAssetUrl(card.suit),
+    suitSymbol: suitSymbol(card.suit),
+    state,
+    isRed: isRedSuit(card.suit),
+    pulsing
+  }
 }
 
-function renderChips(card: DeckCardRow, remaining: number): string {
+function chipViews(card: DeckCardRow): { chips: CardChipView[]; overflowCount: number } {
   const maxVisible = 48
   const exactSeen = seenExactCards.filter((item) => item.name === card.name)
   const variants = card.variants.length ? card.variants : Array.from({ length: card.count }, (_, index) => fallbackVariant(card, index))
@@ -1974,50 +1940,39 @@ function renderChips(card: DeckCardRow, remaining: number): string {
     .map((variant, index) => ({ variant, index }))
     .slice(0, maxVisible)
 
-  const chips = visibleVariants
-    .map((item, displayIndex) => {
+  return {
+    chips: visibleVariants.map((item, displayIndex) => {
       const state = seenVariantStates.get(item.index) ?? "remaining"
-      return renderChip(item.variant, state, displayIndex, seenVariantPulse.has(item.index) && state !== "remaining")
-    })
-    .join("")
-
-  const overflowCount = Math.max(0, variants.length - visibleVariants.length)
-  const overflow = overflowCount > 0 ? `<span class="sgs-card-overflow">+${overflowCount}</span>` : ""
-  void remaining
-  return chips + overflow
+      return chipView(item.variant, state, displayIndex, seenVariantPulse.has(item.index) && state !== "remaining")
+    }),
+    overflowCount: Math.max(0, variants.length - visibleVariants.length)
+  }
 }
 
-function renderGroup(type: NonNullable<DeckCardEntry["type"]>, label: string): string {
+function cardGroupView(type: NonNullable<DeckCardEntry["type"]>, label: string): CardGroupView {
   const cards = groupCards(type)
   const remaining = cards.reduce((sum, card) => sum + Math.max(0, card.count - exactSeenCountByName(card.name)), 0)
   const open = openGroups[type] !== false
-  const rows = cards
-    .map((card) => {
+  return {
+    type,
+    label,
+    cardCount: cards.length,
+    remaining,
+    open,
+    rows: cards.map((card) => {
       const seen = exactSeenCountByName(card.name)
       const left = Math.max(0, card.count - seen)
-      const exhaustedClass = left <= 0 ? " is-empty" : ""
-      return `
-        <div class="sgs-card-row${exhaustedClass}" data-card-name="${escapeHtml(card.name)}">
-          <div class="sgs-card-name"><span>${escapeHtml(card.name)}</span><b>× ${left}</b></div>
-          <div class="sgs-card-cells">${renderChips(card, left)}</div>
-          <div class="sgs-card-seen">已见 ${seen}</div>
-        </div>
-      `
+      const chips = chipViews(card)
+      return {
+        name: card.name,
+        seen,
+        left,
+        exhausted: left <= 0,
+        chips: chips.chips,
+        overflowCount: chips.overflowCount
+      }
     })
-    .join("")
-
-  return `
-    <section class="sgs-deck-section" data-group="${type}">
-      <button class="sgs-section-head" type="button" data-action="toggle-group" data-group="${type}">
-        <span class="sgs-chevron">${open ? "⌄" : "›"}</span>
-        <span>${label}（${cards.length}）</span>
-        <strong>${remaining}</strong>
-      </button>
-      <div class="sgs-section-body${open ? "" : " is-closed"}">
-        ${rows}
-      </div>
-    </section>
-  `
+  }
 }
 
 // 敌方已知手牌列表（面板内固定区域，不依赖屏幕坐标）。
@@ -2027,7 +1982,7 @@ function renderGroup(type: NonNullable<DeckCardEntry["type"]>, label: string): s
 // 展示手牌/获得判定牌等合成事件不会往里 +1，会导致敌方面板漏显（曾出现过河拆桥看了对方
 // 整手牌却不显示）。改为直接读 seenExactCards 后，敌人把该牌打出/弃置时其 zone 会转 public，
 // 自然从面板消失，无需额外同步。
-function renderEnemyKnownHands(): string {
+function enemyKnownHandsView(): EnemyHandView[] {
   const byOwnerKey = new Map<string, { label: string; cards: ExactSeenCard[] }>()
   for (const card of seenExactCards) {
     if (card.zone !== "player-visible") {
@@ -2043,36 +1998,20 @@ function renderEnemyKnownHands(): string {
     byOwnerKey.set(ownerKey, bucket)
   }
 
-  const rows: string[] = []
-  for (const { label, cards } of byOwnerKey.values()) {
+  const rows: EnemyHandView[] = []
+  for (const [ownerKey, { label, cards }] of byOwnerKey.entries()) {
     if (!cards.length) {
       continue
     }
-    const chips = cards.slice(0, 16).map(renderKnownHandChip).join("")
-    const more = cards.length > 16 ? `<span class="sgs-hand-more">+${cards.length - 16}</span>` : ""
-    rows.push(`
-      <div class="sgs-enemy-hand">
-        <div class="sgs-enemy-hand-name">${escapeHtml(label)}<b>${cards.length}</b></div>
-        <div class="sgs-enemy-hand-cards">${chips}${more}</div>
-      </div>
-    `)
+    rows.push({
+      key: ownerKey,
+      label,
+      count: cards.length,
+      cards: cards.slice(0, 16).map(knownHandChipView),
+      moreCount: Math.max(0, cards.length - 16)
+    })
   }
-
-  if (!rows.length) {
-    return ""
-  }
-
-  return `
-    <section class="sgs-known-zone">
-      <div class="sgs-known-zone-head">
-        <span>敌方已知手牌</span>
-        <strong>${rows.length}</strong>
-      </div>
-      <div class="sgs-known-zone-body">
-        ${rows.join("")}
-      </div>
-    </section>
-  `
+  return rows
 }
 
 type CurrentKnownCard = {
@@ -2081,14 +2020,13 @@ type CurrentKnownCard = {
   rank?: string
 }
 
-function renderKnownHandChip(card: CurrentKnownCard): string {
-  const redClass = isRedSuit(card.suit) ? " is-red" : ""
-  const nameLabel = escapeHtml(handCardNameLabel(card.name))
-  const rankLabel = escapeHtml(card.rank ?? "")
-  const metaClass = card.suit || card.rank ? "" : " is-empty"
+function knownHandChipView(card: CurrentKnownCard): EnemyKnownCardView {
   const description = cardDescription(card.name)
-  const title = escapeHtml(
-    cardTooltip(
+  return {
+    key: `${card.name}:${card.suit ?? ""}:${card.rank ?? ""}`,
+    nameLabel: handCardNameLabel(card.name),
+    rankLabel: card.rank ?? "",
+    title: cardTooltip(
       {
         name: card.name,
         ...(card.suit ? { suit: card.suit } : {}),
@@ -2096,18 +2034,221 @@ function renderKnownHandChip(card: CurrentKnownCard): string {
         ...(description ? { description } : {})
       },
       "玩家已见"
-    )
-  )
-  return `<span class="sgs-hand-card${redClass}" title="${title}"><span class="sgs-hand-card-name">${nameLabel}</span><span class="sgs-hand-card-meta${metaClass}">${renderSuitIcon(card.suit)}${rankLabel}</span></span>`
+    ),
+    suitIconUrl: suitAssetUrl(card.suit),
+    suitSymbol: suitSymbol(card.suit),
+    isRed: isRedSuit(card.suit),
+    hasMeta: Boolean(card.suit || card.rank)
+  }
 }
 
-// 浮窗已废弃：敌方已知手牌改为记牌器面板内的固定列表（renderEnemyKnownHands），
-// 不再依赖屏幕坐标/锚点（坐标换算脆弱、且会延迟）。此处仅清空旧浮窗根，保证不残留。
-function renderKnownHandOverlay(): void {
-  const root = document.getElementById(HAND_OVERLAY_ROOT_ID)
-  if (root && root.innerHTML) {
-    root.innerHTML = ""
+function guanxingView(): GuanxingView {
+  const topCount = guanxingTop.length
+  const bottomCount = guanxingBottom.length
+  return {
+    visible: topCount > 0 || bottomCount > 0,
+    title: `观星控底：查看过 ${guanxingPeekCount} 张；悬浮顶/底数字可看已捕获牌面`,
+    topCount,
+    topTitle: topCount > 0 ? guanxingCardsTip("你观星控到牌堆顶、尚未被摸走的牌", guanxingTop, "按摸牌顺序排列，1 即下一张摸牌") : "",
+    bottomCount,
+    bottomTitle: bottomCount > 0 ? guanxingCardsTip("你观星垫到牌堆底的牌", guanxingBottom, "本轮一般摸不到，洗牌后失效") : ""
   }
+}
+
+function eventLogRows(): EventLogRowView[] {
+  return displayEvents.slice(-80).map((item) => ({
+    id: item.id,
+    type: item.type,
+    time: formatClock(item.at),
+    text: item.text
+  }))
+}
+
+function waitingTitle(): string {
+  return trackingPhase === "detecting-mode" ? "检测到开局" : "等待开局"
+}
+
+function waitingDetail(): string {
+  return trackingPhase === "detecting-mode"
+    ? gameModeSource
+    : gameModeId
+      ? `${supportedModeLabel(gameModeId)} · 等待开局信号`
+      : "监听页面中，识别到 2v2 或 1v1 后开始记牌"
+}
+
+function buildTrackerSnapshot(): TrackerSnapshot {
+  const deckActive = isDeckActive()
+  const modeLabel = supportedModeLabel(gameModeId)
+  const connectionLabel = `${trackingPhase === "ended" ? "已结束" : status.listening ? "监听中" : "已暂停"} · ${phaseLabel()}`
+  const connectionClass = status.listening && trackingPhase !== "waiting" ? "is-live" : "is-paused"
+  const baselineText = midGameBaseline ? "中途接入" : "从开局统计"
+  const versionLabel = `${CONTENT_VERSION.replace("extension-content-", "")}${status.hookVersion ? ` · ${status.hookVersion.replace("extension-public-hook-", "")}` : ""}`
+  const displayedRemainingSource = `协议牌堆剩余 ${drawPileRemainingLabel()}；未见实体牌 ${cycleRemainingTotal()}；${drawPileRemainingSource || "等待协议牌堆信号"}`
+  const countWaiting = !deckActive || drawPileRemaining === undefined
+  return {
+    contentVersion: CONTENT_VERSION,
+    hookVersion: status.hookVersion,
+    trackingPhase,
+    hasInGameSignal,
+    ...(gameModeId ? { gameModeId } : {}),
+    gameModeLabel: modeLabel,
+    gameModeSource,
+    deckProfileSource,
+    connectionLabel,
+    connectionClass,
+    phaseLabel: phaseLabel(),
+    baselineText,
+    versionLabel,
+    countTitle: deckActive ? displayedRemainingSource : gameModeSource,
+    countText: deckActive && drawPileRemaining !== undefined ? `${drawPileCalibrated ? "" : "~"}${drawPileRemaining}` : "--",
+    ...(deckActive && drawPileRemaining !== undefined ? { countTotal: totalCards() } : {}),
+    countWaiting,
+    isDeckActive: deckActive,
+    totalCards: totalCards(),
+    cycleRemainingTotal: cycleRemainingTotal(),
+    cycleSeenTotal: cycleSeenTotal(),
+    drawPileRemainingLabel: drawPileRemainingLabel(),
+    ...(drawPileRemaining !== undefined ? { drawPileRemaining } : {}),
+    drawPileCalibrated,
+    midGameBaseline,
+    status: { ...status },
+    groups: deckActive
+      ? [cardGroupView("basic", "基本牌"), cardGroupView("trick", "锦囊牌"), cardGroupView("equip", "装备牌")]
+      : [],
+    enemyHands: deckActive ? enemyKnownHandsView() : [],
+    guanxing: deckActive ? guanxingView() : { visible: false, title: "", topCount: 0, topTitle: "", bottomCount: 0, bottomTitle: "" },
+    events: eventLogRows(),
+    waitingTitle: waitingTitle(),
+    waitingDetail: waitingDetail()
+  }
+}
+
+function syncReactiveState(): void {
+  trackerStore.state.trackingPhase = trackingPhase
+  trackerStore.state.hasInGameSignal = hasInGameSignal
+  trackerStore.state.gameModeId = gameModeId
+  trackerStore.state.gameModeSource = gameModeSource
+  trackerStore.state.deckProfileSource = deckProfileSource
+  trackerStore.state.drawPileRemaining = drawPileRemaining
+  trackerStore.state.drawPileRemainingSource = drawPileRemainingSource
+  trackerStore.state.drawPileCalibrated = drawPileCalibrated
+  trackerStore.state.midGameBaseline = midGameBaseline
+  trackerStore.state.trackerState = trackerState
+  replaceTrackerSnapshot(buildTrackerSnapshot())
+}
+
+function mountVuePanel(): void {
+  const host = ensureRootHost()
+  if (vueApp) {
+    return
+  }
+  const shadow = host.shadowRoot ?? host.attachShadow({ mode: "open" })
+  const style = document.createElement("style")
+  style.textContent = trackerStyles
+    .replaceAll("#sgs-card-tracker-root", ".sgs-card-tracker-root")
+    .replaceAll("#sgs-known-hand-overlay-root", ".sgs-known-hand-overlay-root")
+  const mountPoint = document.createElement("div")
+  shadow.append(style, mountPoint)
+  vueApp = createApp(TrackerApp)
+  vueApp.mount(mountPoint)
+}
+
+function renderPanel(): void {
+  mountVuePanel()
+  syncReactiveState()
+  queueKnownHandOverlayRender()
+  queueRenderStateSnapshot()
+}
+
+function queueRender(): void {
+  if (renderQueued) {
+    return
+  }
+  renderQueued = true
+  scheduleRenderWork(() => {
+    renderQueued = false
+    renderPanel()
+  })
+}
+
+function scheduleRenderWork(callback: () => void): void {
+  if (document.visibilityState === "hidden") {
+    window.setTimeout(callback, 0)
+    return
+  }
+  window.requestAnimationFrame(callback)
+}
+
+function ensureRootHost(): HTMLElement {
+  let root = document.getElementById(ROOT_ID)
+  if (!root) {
+    root = document.createElement("div")
+    root.id = ROOT_ID
+    document.documentElement.append(root)
+  }
+  return root
+}
+
+function bindTrackerActions(): void {
+  trackerActions.collapse = () => {
+    trackerStore.ui.collapsed = true
+    queueRender()
+  }
+  trackerActions.expand = () => {
+    trackerStore.ui.collapsed = false
+    queueRender()
+  }
+  trackerActions.toggleListen = () => {
+    status.listening = !status.listening
+    queueRender()
+  }
+  trackerActions.reset = () => {
+    resetTracker({ preserveMode: true })
+    queueRender()
+  }
+  trackerActions.exportJson = () => {
+    void exportJson()
+  }
+  trackerActions.toggleLog = () => {
+    trackerStore.ui.logCollapsed = !trackerStore.ui.logCollapsed
+    window.localStorage.setItem(LOG_COLLAPSED_STORAGE_KEY, String(trackerStore.ui.logCollapsed))
+    queueRender()
+  }
+  trackerActions.toggleGroup = (group: string) => {
+    openGroups[group] = openGroups[group] === false
+    queueRender()
+  }
+  trackerActions.setMode = (mode: SupportedGameModeId) => {
+    manualModeLocked = true
+    protocolModeLocked = false
+    setGameMode(mode, "手动选择")
+    if (trackingPhase !== "ended") {
+      hasInGameSignal = true
+      trackingPhase = "in-game"
+    }
+    queueRender()
+  }
+  trackerActions.setPanelWidth = (width: number, persist = false) => {
+    trackerStore.ui.panelWidth = clamp(width, MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, window.innerWidth - 16))
+    if (persist) {
+      window.localStorage.setItem(PANEL_WIDTH_STORAGE_KEY, String(trackerStore.ui.panelWidth))
+      queueRender()
+    }
+  }
+}
+
+function ensureRoot(): HTMLElement {
+  mountVuePanel()
+  return ensureRootHost()
+}
+
+function bindPanelEvents(_root: HTMLElement): void {
+  bindTrackerActions()
+}
+
+// 浮窗已废弃：敌方已知手牌已并入 Vue 面板。这里保留队列入口，避免协议层调用分叉。
+function renderKnownHandOverlay(): void {
+  document.getElementById(HAND_OVERLAY_ROOT_ID)?.remove()
 }
 
 function queueKnownHandOverlayRender(force = false): void {
@@ -2137,22 +2278,6 @@ function queueKnownHandOverlayRender(force = false): void {
   })
 }
 
-function renderEventLog(): string {
-  const rows = displayEvents
-    .slice(-80)
-    .map((item) => {
-      const typeClass = ` is-${item.type}`
-      return `
-        <div class="sgs-event-row${typeClass}">
-          <time>${formatClock(item.at)}</time>
-          <span>${escapeHtml(item.text)}</span>
-        </div>
-      `
-    })
-    .join("")
-  return rows || `<div class="sgs-empty">等待对局内公开事件</div>`
-}
-
 function phaseLabel(): string {
   if (trackingPhase === "in-game") {
     return "对局中"
@@ -2164,26 +2289,6 @@ function phaseLabel(): string {
     return "识别模式"
   }
   return "等待开局"
-}
-
-function renderWaitingView(): string {
-  const waitingTitle = trackingPhase === "detecting-mode" ? "检测到开局" : "等待开局"
-  const waitingDetail =
-    trackingPhase === "detecting-mode"
-      ? gameModeSource
-      : gameModeId
-        ? `${supportedModeLabel(gameModeId)} · 等待开局信号`
-        : "监听页面中，识别到 2v2 或 1v1 后开始记牌"
-  return `
-    <div class="sgs-waiting-view">
-      <div class="sgs-waiting-status">${escapeHtml(waitingTitle)}</div>
-      <div class="sgs-waiting-detail">${escapeHtml(waitingDetail)}</div>
-      <div class="sgs-mode-row">
-        <button type="button" data-action="set-mode" data-mode="sgs-happy-2v2" class="${gameModeId === "sgs-happy-2v2" ? "is-active" : ""}">2v2</button>
-        <button type="button" data-action="set-mode" data-mode="sgs-1v1" class="${gameModeId === "sgs-1v1" ? "is-active" : ""}">1v1</button>
-      </div>
-    </div>
-  `
 }
 
 function currentStateSignature(): string {
@@ -2213,201 +2318,6 @@ function queueRenderStateSnapshot(): void {
   }
   lastRenderStateSignature = signature
   queueCollectorSnapshot("render-state", true)
-}
-
-function renderPanel(): void {
-  const root = ensureRoot()
-  root.style.setProperty("--sgs-panel-width", `${panelWidth}px`)
-  const previousDeckList = root.querySelector<HTMLElement>(".sgs-deck-list")
-  const previousEventLog = root.querySelector<HTMLElement>(".sgs-event-log")
-  const deckScrollTop = previousDeckList?.scrollTop ?? 0
-  const eventLogScrollTop = previousEventLog?.scrollTop ?? 0
-  const eventLogWasAtBottom = previousEventLog
-    ? previousEventLog.scrollTop + previousEventLog.clientHeight >= previousEventLog.scrollHeight - 8
-    : true
-
-  if (collapsed) {
-    root.innerHTML = `
-      <button class="sgs-tracker-tab" type="button" data-action="expand" title="展开三国杀记牌器">
-        <span>杀</span>
-        <b>${isDeckActive() ? drawPileRemainingLabel() : "待命"}</b>
-      </button>
-    `
-    bindPanelEvents(root)
-    queueKnownHandOverlayRender()
-    queueRenderStateSnapshot()
-    return
-  }
-
-  const connectionLabel = `${trackingPhase === "ended" ? "已结束" : status.listening ? "监听中" : "已暂停"} · ${phaseLabel()}`
-  const connectionClass = status.listening && trackingPhase !== "waiting" ? " is-live" : " is-paused"
-  const baselineText = midGameBaseline ? "中途接入" : "从开局统计"
-  const versionLabel = `${CONTENT_VERSION.replace("extension-content-", "")}${status.hookVersion ? ` · ${status.hookVersion.replace("extension-public-hook-", "")}` : ""}`
-  const displayedRemainingSource = `协议牌堆剩余 ${drawPileRemainingLabel()}；未见实体牌 ${cycleRemainingTotal()}；${drawPileRemainingSource || "等待协议牌堆信号"}`
-  const modeLabel = supportedModeLabel(gameModeId)
-  const summaryLabel = isGameModeReady()
-    ? `${modeLabel} · ${escapeHtml(deckProfileSource)}`
-    : `${modeLabel} · ${escapeHtml(gameModeSource)}`
-  const countMarkup = isDeckActive()
-    ? drawPileRemaining === undefined
-      ? `<span class="sgs-count-waiting">--</span><small>/${totalCards()}</small>`
-      : `${drawPileCalibrated ? "" : "~"}${drawPileRemaining}<small>/${totalCards()}</small>`
-    : `<span class="sgs-count-waiting">--</span>`
-  root.innerHTML = `
-    <aside class="sgs-tracker-panel${panelWidth >= 520 ? " is-wide" : ""}${logCollapsed ? " is-log-collapsed" : ""}" aria-label="三国杀记牌器">
-      <div class="sgs-resize-handle" data-resize-handle title="拖拽调整宽度"></div>
-      <header class="sgs-tracker-header">
-        <div class="sgs-title-lockup">
-          <div class="sgs-logo-mark">杀</div>
-          <div>
-            <h2>三国杀记牌器</h2>
-            <p><span class="sgs-status-dot${connectionClass}"></span>${escapeHtml(connectionLabel)} · ${summaryLabel} · ${escapeHtml(versionLabel)}</p>
-          </div>
-        </div>
-        <div class="sgs-count" title="${escapeHtml(isDeckActive() ? displayedRemainingSource : gameModeSource)}">${countMarkup}</div>
-      </header>
-
-      <div class="sgs-toolbar" role="toolbar" aria-label="记牌器操作">
-        <button type="button" data-action="toggle-listen" title="${status.listening ? "暂停监听" : "继续监听"}">${status.listening ? "Ⅱ" : "▶"}</button>
-        <button type="button" data-action="set-mode" data-mode="sgs-happy-2v2" class="${gameModeId === "sgs-happy-2v2" ? "is-active" : ""}" title="手动锁定欢乐 2v2">2v2</button>
-        <button type="button" data-action="set-mode" data-mode="sgs-1v1" class="${gameModeId === "sgs-1v1" ? "is-active" : ""}" title="手动锁定 1v1">1v1</button>
-        <button type="button" data-action="reset" title="重置本局">↻</button>
-        <button type="button" data-action="export" title="复制本局 JSON">⤓</button>
-        <button type="button" data-action="collapse" title="收起">×</button>
-      </div>
-
-      <div class="sgs-deck-list">
-        ${
-          isDeckActive()
-            ? `${renderGroup("basic", "基本牌")}${renderGroup("trick", "锦囊牌")}${renderGroup("equip", "装备牌")}${renderEnemyKnownHands()}`
-            : renderWaitingView()
-        }
-      </div>
-
-      <footer class="sgs-tracker-footer">
-        ${isDeckActive() ? renderGuanxing() : ""}
-        <div class="sgs-footer-stats">
-          ${
-            isDeckActive()
-              ? `<span>${baselineText}</span><span>牌堆 ${drawPileRemainingLabel()}</span><span>未见 ${cycleRemainingTotal()}</span><span>已见 ${cycleSeenTotal()}</span><span>洗牌 ${status.reshuffleCount}</span><span>结束 ${status.gameOverCount}</span>`
-              : `<span>${escapeHtml(phaseLabel())}</span><span>支持 2v2 / 1v1</span><span>${escapeHtml(gameModeSource)}</span>`
-          }
-          <button type="button" data-action="toggle-log" title="${logCollapsed ? "展开日志" : "折叠日志"}">${logCollapsed ? "日志展开" : "日志折叠"}</button>
-        </div>
-        ${logCollapsed ? "" : `<div class="sgs-event-log">${renderEventLog()}</div>`}
-      </footer>
-    </aside>
-  `
-  bindPanelEvents(root)
-
-  const nextDeckList = root.querySelector<HTMLElement>(".sgs-deck-list")
-  if (nextDeckList) {
-    nextDeckList.scrollTop = deckScrollTop
-  }
-  const nextEventLog = root.querySelector<HTMLElement>(".sgs-event-log")
-  if (nextEventLog) {
-    nextEventLog.scrollTop = eventLogWasAtBottom ? nextEventLog.scrollHeight : eventLogScrollTop
-  }
-  queueKnownHandOverlayRender()
-  queueRenderStateSnapshot()
-}
-
-function queueRender(): void {
-  if (renderQueued) {
-    return
-  }
-  renderQueued = true
-  scheduleRenderWork(() => {
-    renderQueued = false
-    renderPanel()
-  })
-}
-
-function scheduleRenderWork(callback: () => void): void {
-  if (document.visibilityState === "hidden") {
-    window.setTimeout(callback, 0)
-    return
-  }
-  window.requestAnimationFrame(callback)
-}
-
-function ensureRoot(): HTMLElement {
-  let root = document.getElementById(ROOT_ID)
-  if (!root) {
-    root = document.createElement("div")
-    root.id = ROOT_ID
-    document.documentElement.append(root)
-  }
-  if (!root.dataset.eventsBound) {
-    root.dataset.eventsBound = "true"
-    root.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true })
-    root.addEventListener("dragstart", (event) => event.preventDefault())
-    root.addEventListener("selectstart", (event) => event.preventDefault())
-  }
-  return root
-}
-
-function bindPanelEvents(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>("[data-action]").forEach((element) => {
-    element.addEventListener("click", () => {
-      const action = element.dataset.action
-      if (action === "collapse") {
-        collapsed = true
-      } else if (action === "expand") {
-        collapsed = false
-      } else if (action === "toggle-listen") {
-        status.listening = !status.listening
-      } else if (action === "reset") {
-        resetTracker({ preserveMode: true })
-      } else if (action === "export") {
-        void exportJson()
-      } else if (action === "toggle-log") {
-        logCollapsed = !logCollapsed
-        window.localStorage.setItem(LOG_COLLAPSED_STORAGE_KEY, String(logCollapsed))
-      } else if (action === "toggle-group") {
-        const group = element.dataset.group
-        if (group) {
-          openGroups = {
-            ...openGroups,
-            [group]: openGroups[group] === false
-          }
-        }
-      } else if (action === "set-mode") {
-        const mode = element.dataset.mode as SupportedGameModeId | undefined
-        if (mode) {
-          manualModeLocked = true
-          protocolModeLocked = false
-          setGameMode(mode, "手动选择")
-          if (trackingPhase !== "ended") {
-            hasInGameSignal = true
-            trackingPhase = "in-game"
-          }
-        }
-      }
-      queueRender()
-    })
-  })
-
-  const resizeHandle = root.querySelector<HTMLElement>("[data-resize-handle]")
-  resizeHandle?.addEventListener("mousedown", (event) => {
-    event.preventDefault()
-    const startX = event.clientX
-    const startWidth = panelWidth
-    const panel = root.querySelector<HTMLElement>(".sgs-tracker-panel")
-    const onMove = (moveEvent: MouseEvent) => {
-      panelWidth = clamp(startWidth + startX - moveEvent.clientX, MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, window.innerWidth - 16))
-      root.style.setProperty("--sgs-panel-width", `${panelWidth}px`)
-      panel?.classList.toggle("is-wide", panelWidth >= 520)
-    }
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove)
-      window.removeEventListener("mouseup", onUp)
-      window.localStorage.setItem(PANEL_WIDTH_STORAGE_KEY, String(panelWidth))
-      queueRender()
-    }
-    window.addEventListener("mousemove", onMove)
-    window.addEventListener("mouseup", onUp)
-  })
 }
 
 function resetTracker(options: { preserveMode?: boolean } = {}): void {
@@ -2974,6 +2884,7 @@ function bootstrap(): void {
 
   injectPageHook()
   if (IS_TOP_FRAME) {
+    bindTrackerActions()
     ensureRoot()
     renderPanel()
     queueCollectorSnapshot("content-ready", true)

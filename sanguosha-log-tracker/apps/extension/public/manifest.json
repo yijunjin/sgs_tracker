@@ -17,7 +17,6 @@
     {
       "matches": ["https://web.sanguosha.com/*", "https://*.sanguosha.com/*"],
       "js": ["content.js"],
-      "css": ["content.css"],
       "run_at": "document_idle",
       "all_frames": true,
       "match_about_blank": true
