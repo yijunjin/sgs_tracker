@@ -5,17 +5,22 @@ import {
   deckMoveCount,
   defaultDeckProfile,
   deckProfiles,
+  createRuleLibrary,
+  gameEventsToParsedLogEvents,
   getDeckTotalCount,
-  parseLogInput,
+  parseGameEvents,
   canonicalPlayerKey,
   isAllyDrawText,
   allyDrawActor as sharedAllyDrawActor,
   allyGeneralNames,
   normalizeText,
+  systemRuleLibrary,
   type CardName,
   type DeckCardEntry,
   type DeckPileState,
   type ParsedLogEvent,
+  type RuleDefinition,
+  type RuleLibrary,
   type SeatRosterEntry,
   type TrackerState
 } from "@slt/shared"
@@ -182,6 +187,7 @@ const CONTENT_VERSION = "extension-content-v34-reshuffle-keep-enemy"
 const CONTENT_BOOT_KEY = "__SGS_TRACKER_CONTENT_VERSION__"
 const PANEL_WIDTH_STORAGE_KEY = "sgs-tracker-panel-width"
 const LOG_COLLAPSED_STORAGE_KEY = "sgs-tracker-log-collapsed"
+const CUSTOM_RULES_STORAGE_KEY = "sgs-tracker-custom-rules"
 const COLLECTOR_URL = "http://127.0.0.1:18765/snapshot"
 const MIN_PANEL_WIDTH = 340
 const MAX_PANEL_WIDTH = 760
@@ -212,9 +218,13 @@ let lastRenderStateSignature = ""
 let handOverlayQueued = false
 let lastHandOverlayRenderAt = 0
 let vueApp: VueApp<Element> | undefined
+let customRules: RuleDefinition[] = loadCustomRules()
+let activeRuleLibrary: RuleLibrary = createRuleLibrary(customRules)
 
 trackerStore.ui.logCollapsed = loadBoolean(LOG_COLLAPSED_STORAGE_KEY, false)
 trackerStore.ui.panelWidth = loadNumber(PANEL_WIDTH_STORAGE_KEY, 388)
+trackerStore.state.ruleConfig.systemRules = systemRuleLibrary.rules
+trackerStore.state.ruleConfig.customRules = customRules
 const openGroups: Record<string, boolean> = trackerStore.ui.openGroups
 
 const status = trackerStore.state.status
@@ -388,6 +398,60 @@ function loadNumber(key: string, fallback: number): number {
 function loadBoolean(key: string, fallback: boolean): boolean {
   const raw = window.localStorage.getItem(key)
   return raw === null ? fallback : raw === "true"
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value))
+}
+
+function isValidRule(value: unknown): value is RuleDefinition {
+  if (!isRecord(value) || typeof value.id !== "string" || !value.id.trim() || !Array.isArray(value.actions)) {
+    return false
+  }
+
+  return value.actions.every((action) => isRecord(action) && typeof action.type === "string" && action.type.trim().length > 0)
+}
+
+function normalizeRule(value: RuleDefinition): RuleDefinition {
+  return {
+    ...value,
+    id: value.id.trim(),
+    enabled: value.enabled !== false
+  }
+}
+
+function prepareCustomRule(value: RuleDefinition): RuleDefinition {
+  if (!isValidRule(value)) {
+    throw new Error("规则必须包含 id 和 actions[].type")
+  }
+  const rule = normalizeRule(value)
+  if (systemRuleLibrary.rules.some((item) => item.id === rule.id)) {
+    throw new Error("规则 id 已被系统规则占用")
+  }
+  return rule
+}
+
+function loadCustomRules(): RuleDefinition[] {
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_RULES_STORAGE_KEY)
+    if (!raw) {
+      return []
+    }
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed) ? parsed.filter(isValidRule).map(normalizeRule) : []
+  } catch {
+    return []
+  }
+}
+
+function persistCustomRules(): void {
+  window.localStorage.setItem(CUSTOM_RULES_STORAGE_KEY, JSON.stringify(customRules))
+}
+
+function refreshRuleLibrary(): void {
+  activeRuleLibrary = createRuleLibrary(customRules)
+  trackerStore.state.ruleConfig.systemRules = systemRuleLibrary.rules
+  trackerStore.state.ruleConfig.customRules = [...customRules]
 }
 
 function runtimeUrl(path: string): string {
@@ -831,6 +895,28 @@ function drawPileRemainingLabel(): string {
 
 function formatClock(timestamp: number): string {
   return timestamp ? new Date(timestamp).toLocaleTimeString("zh-CN", { hour12: false }) : "--:--:--"
+}
+
+function applyRuleDrawPileDecrement(params: Record<string, unknown>, at: number): boolean {
+  if (!isDeckActive() || drawPileRemaining === undefined) {
+    return false
+  }
+  const amount = Number(params.amount ?? 1)
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return false
+  }
+
+  const delta = Math.floor(amount)
+  const previous = drawPileRemaining
+  drawPileRemaining = Math.max(0, drawPileRemaining - delta)
+  const reason = typeof params.reason === "string" && params.reason.trim() ? params.reason.trim() : "规则动作"
+  drawPileRemainingSource = `规则扣减 ${delta} 张：${reason} · ${formatClock(at)}`
+  pushDisplayEvent({
+    at,
+    type: "protocol",
+    text: `规则扣减牌堆 ${previous} → ${drawPileRemaining}（${reason}）`
+  })
+  return true
 }
 
 function groupCards(type: DeckCardEntry["type"]): DeckCardRow[] {
@@ -2209,6 +2295,69 @@ function bindTrackerActions(): void {
   trackerActions.exportJson = () => {
     void exportJson()
   }
+  trackerActions.openRuleConfig = () => {
+    trackerStore.ui.ruleConfigOpen = true
+    refreshRuleLibrary()
+    queueRender()
+  }
+  trackerActions.closeRuleConfig = () => {
+    trackerStore.ui.ruleConfigOpen = false
+    trackerStore.state.ruleConfig.lastError = ""
+    queueRender()
+  }
+  trackerActions.saveCustomRule = (incomingRule: RuleDefinition) => {
+    try {
+      const rule = prepareCustomRule(incomingRule)
+      const existingIndex = customRules.findIndex((item) => item.id === rule.id)
+      customRules =
+        existingIndex >= 0
+          ? customRules.map((item) => (item.id === rule.id ? rule : item))
+          : [...customRules, rule]
+      persistCustomRules()
+      refreshRuleLibrary()
+      trackerStore.state.ruleConfig.lastError = ""
+      trackerStore.state.ruleConfig.lastSavedAt = Date.now()
+      pushDisplayEvent({ at: Date.now(), type: "protocol", text: `${existingIndex >= 0 ? "已更新" : "已新增"}规则：${rule.id}` })
+      queueRender()
+      return true
+    } catch (error) {
+      trackerStore.state.ruleConfig.lastError = error instanceof Error ? error.message : "规则配置无效"
+      queueRender()
+      return false
+    }
+  }
+  trackerActions.toggleCustomRule = (ruleId: string, enabled: boolean) => {
+    let changed = false
+    customRules = customRules.map((rule) => {
+      if (rule.id !== ruleId) {
+        return rule
+      }
+      changed = true
+      return { ...rule, enabled }
+    })
+    if (!changed) {
+      return
+    }
+    persistCustomRules()
+    refreshRuleLibrary()
+    trackerStore.state.ruleConfig.lastError = ""
+    trackerStore.state.ruleConfig.lastSavedAt = Date.now()
+    pushDisplayEvent({ at: Date.now(), type: "protocol", text: `${enabled ? "已启用" : "已停用"}规则：${ruleId}` })
+    queueRender()
+  }
+  trackerActions.removeCustomRule = (ruleId: string) => {
+    const nextRules = customRules.filter((rule) => rule.id !== ruleId)
+    if (nextRules.length === customRules.length) {
+      return
+    }
+    customRules = nextRules
+    persistCustomRules()
+    refreshRuleLibrary()
+    trackerStore.state.ruleConfig.lastError = ""
+    trackerStore.state.ruleConfig.lastSavedAt = Date.now()
+    pushDisplayEvent({ at: Date.now(), type: "protocol", text: `已删除规则：${ruleId}` })
+    queueRender()
+  }
   trackerActions.toggleLog = () => {
     trackerStore.ui.logCollapsed = !trackerStore.ui.logCollapsed
     window.localStorage.setItem(LOG_COLLAPSED_STORAGE_KEY, String(trackerStore.ui.logCollapsed))
@@ -2676,7 +2825,14 @@ function ingestUnredactedTextRecord(record: HookRecord, at: number): boolean {
   }
 
   changed = ingestGuanxingPlacementText(record.text, at) || changed
-  const parsedEvents = parseLogInput([{ text: record.text, score: 1 }], "hook", deckProfile)
+  const gameEvents = parseGameEvents([{ text: record.text, score: 1 }], "hook", deckProfile)
+  let ruleChanged = false
+  const parsedEvents = gameEventsToParsedLogEvents(gameEvents, deckProfile, activeRuleLibrary, {
+    decrementDrawPile: (params) => {
+      ruleChanged = applyRuleDrawPileDecrement(params, at) || ruleChanged
+    }
+  })
+  changed = ruleChanged || changed
   const event = parsedEvents[0]
   if (!event) {
     return ingestVisibleExactText(record.text, at) || changed

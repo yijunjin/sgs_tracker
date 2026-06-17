@@ -8,8 +8,10 @@ import {
   normalizeTextWithAliases
 } from "./normalize"
 import { canonicalPlayerKey, canonicalTargetKey, isSuspiciousPlayerName } from "./player"
+import { RuleEngine, type RuleActionHandlers, type RuleLibrary } from "./ruleEngine"
+import { systemRuleLibrary } from "./rules"
 import { isChooseGeneralLine } from "./startSignal"
-import type { CardName, DeckProfile, OcrLine, ParsedLogEvent, ParseQuality, TruncatedCardCompletionRule } from "./types"
+import type { CardEventAction, CardName, DeckProfile, GameEvent, OcrLine, ParsedLogEvent, ParseQuality, TruncatedCardCompletionRule } from "./types"
 
 type CardMatchType = "exact" | "truncated-suffix" | "truncated-prefix"
 
@@ -35,6 +37,7 @@ export function loadTruncatedCardCompletionRules(): TruncatedCardCompletionRule[
 const BRACKETED_CARD_PATTERN =
   /^(?<player>.+?)(?<verb>使用了|使用|打出了|打出|弃置了|弃置|装备了|装备|判定牌为)【(?<content>.+?)】$/u
 const CONVERT_PATTERN = /^(?<player>.+?)将【(?<from>.+?)】当【(?<to>.+?)】使用$/u
+const CONVERT_AS_PATTERN = /^(?<player>.+?)将【?(?<from>.+?)】?(?:当|视为)【?(?<to>.+?)】?使用$/u
 const TARGET_USE_PATTERN = /^(?<player>.+?)对(?<target>.+?)使用(?<content>.+)$/u
 const LET_EQUIP_PATTERN = /^(?<player>.+?)让(?<target>.+?)装备(?<content>.+)$/u
 const DIRECT_ACTION_PATTERN = /^(?<player>.+?)(?<verb>使用|打出|弃置|装备)(?<content>.+)$/u
@@ -50,6 +53,7 @@ const SKILL_DISCARD_PATTERN = /^(?<player>.+?)发动(?<skill>[^，,。]*?)[，,]
 const PINDIAN_PATTERN = /^(?<player>.+?)与(?<target>.+?)拼点[，,](?<content>.+)$/u
 const PINDIAN_CARD_PATTERN = /的拼点牌为(?<content>[^，,]+)/gu
 const DRAW_NUMBER_PATTERN = /^(?<player>.+?)(?:从摸牌堆)?获得[1-9]\d*张牌$/u
+const SKILL_INVOKE_PATTERN = /^(?<player>.+?)发动(?<skill>[\p{Script=Han}A-Za-z0-9_·-]{1,12})$/u
 const SUIT_RANK_CARD_PATTERN = /^(?<suit>黑桃|红桃|梅花|方片|方块)?(?<rank>A|10|[2-9JQK])?\s*(?<card>.+)$/u
 const SYMBOL_SUFFIX_CARD_PATTERN = /^(?<card>.+?)(?<suit>[♠♥♣♦])(?<rank>A|10|[2-9JQK])?$/u
 const SUIT_ONLY_PATTERN = /(黑桃|红桃|梅花|方片|方块)(A|10|[2-9JQK])?$/u
@@ -912,6 +916,386 @@ function parseSingleLine(
   return parseAmbiguousLine(rawText, confidence, source, index, "未匹配到支持的公开日志格式。")
 }
 
+function gameEventNameFromAction(action: CardEventAction): GameEvent["event"] {
+  if (action === "use") return "OnCardUse"
+  if (action === "play") return "OnCardPlay"
+  if (action === "discard") return "OnCardDiscard"
+  if (action === "equip") return "OnCardEquip"
+  if (action === "judge") return "OnJudgeResult"
+  if (action === "gainKnown") return "OnCardGain"
+  if (action === "convert" || action === "convert-use") return "OnCardConvert"
+  if (action === "ignore") return "OnIgnoredLog"
+  return "OnUnknownLog"
+}
+
+function createBaseGameEvent(
+  rawText: string,
+  confidence: number,
+  source: ParsedLogEvent["source"],
+  index: number,
+  event: GameEvent["event"]
+): Pick<
+  GameEvent,
+  | "id"
+  | "event"
+  | "rawText"
+  | "normalizedText"
+  | "normalizedRawText"
+  | "confidence"
+  | "source"
+  | "status"
+  | "quality"
+  | "autoAcceptable"
+  | "appliedAliases"
+  | "fingerprint"
+  | "createdAt"
+> {
+  return {
+    ...createBaseEvent(rawText, confidence, source, index),
+    event,
+    confidence,
+    source,
+    status: "pending",
+    quality: "ambiguous",
+    autoAcceptable: false
+  }
+}
+
+function gameCardsFromDetails(details: ResolvedCardDetail[], deckProfile: DeckProfile): NonNullable<GameEvent["cards"]> {
+  return details
+    .filter((detail) => detail.cardName && isCardInDeck(deckProfile, detail.cardName))
+    .map((detail) => ({
+      name: detail.cardName,
+      suit: detail.suit,
+      rank: detail.rank
+    }))
+}
+
+function firstGameCard(event: GameEvent): GameEvent["card"] {
+  return event.card ?? event.cards?.[0]
+}
+
+function cardNamesFromGameCards(cards: GameEvent["cards"]): CardName[] {
+  return (cards ?? []).map((card) => card.name).filter((cardName): cardName is CardName => Boolean(cardName))
+}
+
+function normalizeGameEventQuality(
+  event: GameEvent,
+  quality: ParseQuality,
+  autoAcceptable = quality === "strict"
+): GameEvent {
+  return {
+    ...event,
+    quality,
+    autoAcceptable: quality === "strict" && autoAcceptable
+  }
+}
+
+function gameEventFromParsedLogEvent(event: ParsedLogEvent): GameEvent {
+  const gameEventName = gameEventNameFromAction(event.action)
+  const cards = (event.cardNames?.length ? event.cardNames : event.cardName ? [event.cardName] : []).map((cardName, index) => ({
+    name: cardName,
+    suit: index === 0 ? event.suit : undefined,
+    rank: index === 0 ? event.rank : undefined
+  }))
+  return {
+    id: event.id,
+    event: gameEventName,
+    rawText: event.rawText,
+    normalizedText: event.normalizedText,
+    normalizedRawText: event.normalizedRawText,
+    player: event.playerName,
+    target: event.targetName,
+    sourcePlayer: event.sourcePlayerName,
+    sourceZone: event.sourceZone,
+    gainSource: event.action === "gainKnown" ? "legacyKnown" : undefined,
+    skill: event.skillName,
+    card: cards[0],
+    cards,
+    trackerAction: event.action,
+    confidence: event.confidence,
+    source: event.source,
+    status: event.status,
+    quality: event.quality,
+    autoAcceptable: event.autoAcceptable,
+    supportStatus: event.supportStatus,
+    note: event.note,
+    appliedAliases: event.appliedAliases,
+    fingerprint: event.fingerprint,
+    createdAt: event.createdAt
+  }
+}
+
+function parseGameSingleLine(
+  rawText: string,
+  confidence: number,
+  source: ParsedLogEvent["source"],
+  index: number,
+  deckProfile: DeckProfile
+): GameEvent | undefined {
+  const normalizedText = normalizeText(rawText)
+  if (!normalizedText) {
+    return undefined
+  }
+
+  const skillInvokeMatch = normalizedText.match(SKILL_INVOKE_PATTERN)
+  if (skillInvokeMatch?.groups) {
+    const rawSkillInvokeMatch = rawText.match(SKILL_INVOKE_PATTERN)
+    const player = rawSkillInvokeMatch?.groups?.player ?? skillInvokeMatch.groups.player
+    const skill = rawSkillInvokeMatch?.groups?.skill ?? skillInvokeMatch.groups.skill
+    return normalizeGameEventQuality(
+      {
+        ...createBaseGameEvent(rawText, confidence, source, index, "OnSkillInvoke"),
+        player,
+        skill,
+        status: "accepted",
+        note: "技能发动事件"
+      },
+      hasPlayerName(player) && Boolean(skill) ? "strict" : "ambiguous"
+    )
+  }
+
+  const drawNumberMatch = normalizedText.match(DRAW_NUMBER_PATTERN)
+  if (drawNumberMatch?.groups) {
+    const count = Number(normalizedText.match(/获得(?<count>[1-9]\d*)张牌/u)?.groups?.count)
+    return normalizeGameEventQuality(
+      {
+        ...createBaseGameEvent(rawText, confidence, source, index, "OnCardDraw"),
+        player: drawNumberMatch.groups.player,
+        gainSource: "drawPile",
+        count: Number.isFinite(count) ? count : undefined,
+        trackerAction: "ignore",
+        status: "ignored",
+        note: "暗摸牌数量事件"
+      },
+      "ignored",
+      false
+    )
+  }
+
+  const gainKnownMatch = normalizedText.match(GAIN_KNOWN_PATTERN)
+  if (gainKnownMatch?.groups) {
+    const rawGainKnownMatch = rawText.match(GAIN_KNOWN_PATTERN)
+    const player = gainKnownMatch.groups.player
+    const sourceName = rawGainKnownMatch?.groups?.source ?? gainKnownMatch.groups.source ?? "摸牌堆"
+    const content = rawGainKnownMatch?.groups?.content ?? gainKnownMatch.groups.content ?? ""
+    const details = findGainKnownCardDetails(content, deckProfile)
+    const cards = gameCardsFromDetails(details, deckProfile)
+    const detail = firstDetailOrFallback(details, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(details)
+    const hasUnresolved = hasUnresolvedCardDetail(details)
+    const suspiciousPlayer = isSuspiciousPlayerName(player)
+    const conflictingActions = hasConflictingActionKeywords(normalizedText)
+    const quality: ParseQuality =
+      cards.length > 0 &&
+      !hasUnresolved &&
+      !hasPartialMatch &&
+      !suspiciousPlayer &&
+      !conflictingActions &&
+      hasPlayerName(player)
+        ? "strict"
+        : "ambiguous"
+
+    const noteParts = [cards.length > 0 ? `公开日志显示从${sourceName}获得具名牌` : detail.note]
+    if (suspiciousPlayer) noteParts.push("玩家名区域异常，疑似 OCR 串行污染")
+    if (conflictingActions) noteParts.push("同一行包含冲突动作关键词，需要人工确认")
+
+    return normalizeGameEventQuality(
+      {
+        ...createBaseGameEvent(rawText, confidence, source, index, "OnCardGain"),
+        player,
+        gainSource: sourceName === "五谷丰登" ? "fiveGrain" : "drawPile",
+        card: cards[0] ?? (detail.cardName ? { name: detail.cardName, suit: detail.suit, rank: detail.rank } : undefined),
+        cards,
+        supportStatus: cards.length > 0 ? "supported" : undefined,
+        note: noteParts.filter(Boolean).join("；") || undefined
+      },
+      quality
+    )
+  }
+
+  const judgeCardGainMatch = normalizedText.match(JUDGE_CARD_GAIN_PATTERN)
+  if (judgeCardGainMatch?.groups) {
+    const rawJudgeCardGainMatch = rawText.match(JUDGE_CARD_GAIN_PATTERN)
+    const content = rawJudgeCardGainMatch?.groups?.content ?? judgeCardGainMatch.groups.content ?? ""
+    const details = findGainKnownCardDetails(content, deckProfile)
+    const cards = gameCardsFromDetails(details, deckProfile)
+    const detail = firstDetailOrFallback(details, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(details)
+    const hasUnresolved = hasUnresolvedCardDetail(details)
+    const player = judgeCardGainMatch.groups.player
+    const isStrict = cards.length > 0 && !hasUnresolved && !hasPartialMatch && hasPlayerName(player)
+
+    return normalizeGameEventQuality(
+      {
+        ...createBaseGameEvent(rawText, confidence, source, index, "OnCardGain"),
+        player,
+        gainSource: "judge",
+        card: cards[0] ?? (detail.cardName ? { name: detail.cardName, suit: detail.suit, rank: detail.rank } : undefined),
+        cards,
+        supportStatus: cards.length > 0 ? "supported" : undefined,
+        note: createMultiCardNote("获得判定牌", cardNamesFromGameCards(cards), detail.cardName ? "获得判定牌（公开）" : detail.note)
+      },
+      isStrict ? "strict" : "ambiguous"
+    )
+  }
+
+  const regionGainMatch = normalizedText.match(REGION_GAIN_PATTERN)
+  if (regionGainMatch?.groups) {
+    const rawRegionGainMatch = rawText.match(REGION_GAIN_PATTERN)
+    const content = rawRegionGainMatch?.groups?.content ?? regionGainMatch.groups.content ?? ""
+    const details = findGainKnownCardDetails(content, deckProfile)
+    const cards = gameCardsFromDetails(details, deckProfile)
+    const detail = firstDetailOrFallback(details, content, deckProfile)
+    const hasPartialMatch = hasPartialCardMatch(details)
+    const hasUnresolved = hasUnresolvedCardDetail(details)
+    const player = regionGainMatch.groups.player
+    const target = regionGainMatch.groups.target
+    const sourceZone = regionGainMatch.groups.zone
+    const isStrict = cards.length > 0 && !hasUnresolved && !hasPartialMatch && hasPlayerName(player) && hasPlayerName(target)
+
+    return normalizeGameEventQuality(
+      {
+        ...createBaseGameEvent(rawText, confidence, source, index, "OnCardGain"),
+        player,
+        target,
+        sourcePlayer: target,
+        sourceZone,
+        gainSource: "region",
+        card: cards[0] ?? (detail.cardName ? { name: detail.cardName, suit: detail.suit, rank: detail.rank } : undefined),
+        cards,
+        supportStatus: cards.length > 0 ? "supported" : undefined,
+        note: createMultiCardNote(`从${target}的${sourceZone}获得`, cardNamesFromGameCards(cards), detail.cardName ? `从${target}的${sourceZone}获得公开牌` : detail.note)
+      },
+      isStrict ? "strict" : "ambiguous"
+    )
+  }
+
+  const convertMatch = normalizedText.match(CONVERT_AS_PATTERN)
+  if (convertMatch?.groups) {
+    const rawConvertMatch = rawText.match(CONVERT_AS_PATTERN)
+    const fromContent = rawConvertMatch?.groups?.from ?? convertMatch.groups.from ?? ""
+    const toContent = rawConvertMatch?.groups?.to ?? convertMatch.groups.to ?? ""
+    const fromDetail = resolveCardDetail(fromContent, deckProfile)
+    const toDetail = resolveCardDetail(toContent, deckProfile)
+    const player = convertMatch.groups.player
+    const isStrict = Boolean(fromDetail.cardName && toDetail.cardName && hasPlayerName(player))
+
+    return normalizeGameEventQuality(
+      {
+        ...createBaseGameEvent(rawText, confidence, source, index, "OnCardConvert"),
+        player,
+        fromCard: fromDetail.cardName ? { name: fromDetail.cardName, suit: fromDetail.suit, rank: fromDetail.rank } : undefined,
+        toCard: toDetail.cardName ? { name: toDetail.cardName, suit: toDetail.suit, rank: toDetail.rank } : undefined,
+        card: fromDetail.cardName ? { name: fromDetail.cardName, suit: fromDetail.suit, rank: fromDetail.rank } : undefined,
+        cards: fromDetail.cardName ? [{ name: fromDetail.cardName, suit: fromDetail.suit, rank: fromDetail.rank }] : [],
+        trackerAction: "convert",
+        note: fromDetail.cardName
+          ? `转化牌事件，原始牌 ${fromDetail.cardName}，视为 ${toDetail.cardName ?? toContent}。`
+          : `转化牌事件，${fromDetail.note ?? "未识别原始牌名"}。`
+      },
+      isStrict ? "strict" : "ambiguous",
+      false
+    )
+  }
+
+  const parsed = parseSingleLine(rawText, confidence, source, index, deckProfile)
+  return parsed ? gameEventFromParsedLogEvent(parsed) : undefined
+}
+
+function selectedGameCard(event: GameEvent, role: unknown): GameEvent["card"] {
+  if (role === "fromCard") return event.fromCard
+  if (role === "toCard") return event.toCard
+  return firstGameCard(event)
+}
+
+function createTrackerEventFromGameEvent(
+  event: GameEvent,
+  deckProfile: DeckProfile,
+  params: Record<string, unknown>
+): ParsedLogEvent {
+  const role = params.cardRole
+  const selectedCard = selectedGameCard(event, role)
+  const cards = role === "fromCard" && event.fromCard ? [event.fromCard] : event.cards ?? (selectedCard ? [selectedCard] : [])
+  const cardNames = cardNamesFromGameCards(cards)
+  const action = (typeof params.action === "string" ? params.action : event.trackerAction ?? "unknown") as CardEventAction
+  const primaryCardName = selectedCard?.name ?? cardNames[0]
+  const note = typeof params.note === "string" && params.note.length > 0 ? params.note : event.note
+  const quality = action === "ignore" ? "ignored" : event.quality
+  const status = action === "ignore" ? "ignored" : event.status
+  const parsed = withQuality(
+    {
+      id: event.id,
+      rawText: event.rawText,
+      normalizedText: event.normalizedText,
+      normalizedRawText: event.normalizedRawText,
+      playerName: event.player,
+      targetName: event.target,
+      sourcePlayerName: typeof params.sourcePlayerName === "string" ? params.sourcePlayerName : event.sourcePlayer,
+      sourceZone: typeof params.sourceZone === "string" ? params.sourceZone : event.sourceZone,
+      action,
+      cardName: primaryCardName,
+      cardNames,
+      virtualCardName: typeof params.virtualCardName === "string" ? params.virtualCardName : event.toCard?.name,
+      skillName: typeof params.skillName === "string" ? params.skillName : event.skill,
+      suit: selectedCard?.suit,
+      rank: selectedCard?.rank,
+      confidence: event.confidence,
+      source: event.source === "protocol" ? "hook" : event.source,
+      status,
+      supportStatus: event.supportStatus,
+      note,
+      appliedAliases: event.appliedAliases,
+      fingerprint: event.fingerprint,
+      createdAt: event.createdAt
+    },
+    quality,
+    action !== "ignore" && event.autoAcceptable
+  )
+
+  return applyDeckSupport(parsed, deckProfile)
+}
+
+export function createParsedLogEventRuleHandlers(
+  output: ParsedLogEvent[],
+  deckProfile: DeckProfile
+): RuleActionHandlers {
+  return {
+    emitTrackerEvent: (params, context) => {
+      const parsed = createTrackerEventFromGameEvent(context.event, deckProfile, params)
+      if ((parsed.action !== "unknown" && parsed.cardName) || parsed.action === "ignore" || parsed.quality === "ambiguous") {
+        output.push(parsed)
+      }
+    },
+    markCardVisible: () => {
+      // UI/runtime adapters can bind this to exact-card visibility state.
+    },
+    moveCardZone: () => {
+      // UI/runtime adapters can bind this to exact-card zone state.
+    },
+    decrementDrawPile: () => {
+      // The shared compatibility adapter has no draw-pile counter to mutate.
+    }
+  }
+}
+
+export function gameEventsToParsedLogEvents(
+  events: GameEvent[],
+  deckProfile: DeckProfile = defaultDeckProfile,
+  ruleLibrary: RuleLibrary = systemRuleLibrary,
+  handlers: RuleActionHandlers = {}
+): ParsedLogEvent[] {
+  const output: ParsedLogEvent[] = []
+  const engine = new RuleEngine(ruleLibrary, {
+    ...createParsedLogEventRuleHandlers(output, deckProfile),
+    ...handlers
+  })
+  for (const event of events) {
+    engine.trigger(event)
+  }
+  return output
+}
+
 function getLineY(line: OcrLine, fallback: number): number {
   const box = line.box
   if (!box) {
@@ -1014,16 +1398,24 @@ export function parseLogInput(
   source?: ParsedLogEvent["source"],
   deckProfile: DeckProfile = defaultDeckProfile
 ): ParsedLogEvent[] {
+  return gameEventsToParsedLogEvents(parseGameEvents(input, source, deckProfile), deckProfile)
+}
+
+export function parseGameEvents(
+  input: OcrLine[] | string,
+  source?: ParsedLogEvent["source"],
+  deckProfile: DeckProfile = defaultDeckProfile
+): GameEvent[] {
   if (typeof input === "string") {
     const resolvedSource = source ?? "manual"
     return input
       .split(/\r?\n/)
-      .map((line, index) => parseSingleLine(line, resolvedSource === "manual" ? 1 : 0.95, resolvedSource, index, deckProfile))
-      .filter((event): event is ParsedLogEvent => Boolean(event))
+      .map((line, index) => parseGameSingleLine(line, resolvedSource === "manual" ? 1 : 0.95, resolvedSource, index, deckProfile))
+      .filter((event): event is GameEvent => Boolean(event))
   }
 
   const resolvedSource = source ?? "ocr"
   return input
-    .map((line, index) => parseSingleLine(line.text, line.score, resolvedSource, index, deckProfile))
-    .filter((event): event is ParsedLogEvent => Boolean(event))
+    .map((line, index) => parseGameSingleLine(line.text, line.score, resolvedSource, index, deckProfile))
+    .filter((event): event is GameEvent => Boolean(event))
 }

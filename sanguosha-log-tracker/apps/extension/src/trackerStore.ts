@@ -1,5 +1,5 @@
 import { reactive } from "vue"
-import type { DeckCardEntry, ParsedLogEvent, TrackerState } from "@slt/shared"
+import type { DeckCardEntry, ParsedLogEvent, RuleDefinition, TrackerState } from "@slt/shared"
 
 export type SupportedGameModeId = "sgs-happy-2v2" | "sgs-1v1"
 export type TrackingPhase = "waiting" | "detecting-mode" | "in-game" | "ended"
@@ -39,9 +39,17 @@ export type StatusState = {
 
 export type TrackerUiState = {
   collapsed: boolean
+  ruleConfigOpen: boolean
   logCollapsed: boolean
   panelWidth: number
   openGroups: Record<string, boolean>
+}
+
+export type RuleConfigState = {
+  systemRules: RuleDefinition[]
+  customRules: RuleDefinition[]
+  lastError: string
+  lastSavedAt: number
 }
 
 export type CardChipView = {
@@ -160,6 +168,7 @@ export type TrackerStore = {
     trackerState: TrackerState | undefined
     seenExactCards: ExactSeenCard[]
     displayEvents: DisplayEvent[]
+    ruleConfig: RuleConfigState
   }
   snapshot: TrackerSnapshot
 }
@@ -180,6 +189,7 @@ export const trackerStore = reactive<TrackerStore>({
   revision: 0,
   ui: {
     collapsed: false,
+    ruleConfigOpen: false,
     logCollapsed: false,
     panelWidth: 388,
     openGroups: {
@@ -201,7 +211,13 @@ export const trackerStore = reactive<TrackerStore>({
     status: { ...defaultStatus },
     trackerState: undefined as TrackerState | undefined,
     seenExactCards: [] as ExactSeenCard[],
-    displayEvents: [] as DisplayEvent[]
+    displayEvents: [] as DisplayEvent[],
+    ruleConfig: {
+      systemRules: [] as RuleDefinition[],
+      customRules: [] as RuleDefinition[],
+      lastError: "",
+      lastSavedAt: 0
+    }
   },
   snapshot: {
     contentVersion: "",
@@ -249,6 +265,11 @@ export const trackerActions = {
   toggleListen: () => {},
   reset: () => {},
   exportJson: () => {},
+  openRuleConfig: () => {},
+  closeRuleConfig: () => {},
+  saveCustomRule: (_rule: RuleDefinition) => false,
+  toggleCustomRule: (_ruleId: string, _enabled: boolean) => {},
+  removeCustomRule: (_ruleId: string) => {},
   toggleLog: () => {},
   toggleGroup: (_group: string) => {},
   setMode: (_mode: SupportedGameModeId) => {},

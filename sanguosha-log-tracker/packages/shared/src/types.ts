@@ -18,6 +18,58 @@ export type CardSupportStatus = "supported" | "unsupported"
 
 export type ParseQuality = "strict" | "ambiguous" | "ignored" | "unsupported"
 
+export type GameEventName =
+  | "OnCardUse"
+  | "OnCardPlay"
+  | "OnCardDiscard"
+  | "OnCardEquip"
+  | "OnCardGain"
+  | "OnCardDraw"
+  | "OnJudgeResult"
+  | "OnSkillInvoke"
+  | "OnCardConvert"
+  | "OnIgnoredLog"
+  | "OnUnknownLog"
+
+export type GameEventCard = {
+  name?: CardName | undefined
+  suit?: string | undefined
+  rank?: string | undefined
+}
+
+export interface GameEvent {
+  id: string
+  event: GameEventName
+  rawText: string
+  normalizedText: string
+  normalizedRawText: string
+  player?: string | undefined
+  target?: string | undefined
+  sourcePlayer?: string | undefined
+  sourceZone?: string | undefined
+  gainSource?: "drawPile" | "fiveGrain" | "judge" | "region" | "legacyKnown" | "unknown" | undefined
+  skill?: string | undefined
+  card?: GameEventCard | undefined
+  cards?: GameEventCard[] | undefined
+  fromCard?: GameEventCard | undefined
+  toCard?: GameEventCard | undefined
+  count?: number | undefined
+  trackerAction?: CardEventAction | undefined
+  confidence: number
+  source: "ocr" | "manual" | "mock" | "hook" | "protocol"
+  status: CardEventStatus
+  quality: ParseQuality
+  autoAcceptable: boolean
+  supportStatus?: CardSupportStatus | undefined
+  note?: string | undefined
+  appliedAliases?: Array<{
+    alias: string
+    canonical: CardName
+  }> | undefined
+  fingerprint: string
+  createdAt: string
+}
+
 export type RoiRect = {
   x: number
   y: number
@@ -89,6 +141,8 @@ export interface ParsedLogEvent {
   action: CardEventAction
   cardName?: CardName | undefined
   cardNames?: CardName[] | undefined
+  virtualCardName?: CardName | undefined
+  skillName?: string | undefined
   suit?: string | undefined
   rank?: string | undefined
   confidence: number

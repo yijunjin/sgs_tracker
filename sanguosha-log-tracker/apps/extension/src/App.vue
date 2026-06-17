@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { Download, Pause, Play, RotateCcw, X } from "lucide-vue-next"
+import { Download, Pause, Play, RotateCcw, Settings, X } from "lucide-vue-next"
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue"
 import CardGroup from "./components/CardGroup.vue"
 import EnemyHand from "./components/EnemyHand.vue"
+import RuleConfigView from "./components/RuleConfigView.vue"
 import { trackerActions, trackerStore, type SupportedGameModeId } from "./trackerStore"
 
 const deckListRef = ref<HTMLElement | null>(null)
@@ -27,6 +28,14 @@ watch(
 
 function setMode(mode: SupportedGameModeId): void {
   trackerActions.setMode(mode)
+}
+
+function toggleRuleConfig(): void {
+  if (ui.ruleConfigOpen) {
+    trackerActions.closeRuleConfig()
+    return
+  }
+  trackerActions.openRuleConfig()
 }
 
 function startResize(event: MouseEvent): void {
@@ -129,13 +138,25 @@ onBeforeUnmount(() => {
         <button type="button" title="复制本局 JSON" @click="trackerActions.exportJson">
           <Download class="sgs-icon" aria-hidden="true" />
         </button>
+        <button type="button" :class="{ 'is-active': ui.ruleConfigOpen }" title="规则配置" @click="toggleRuleConfig">
+          <Settings class="sgs-icon" aria-hidden="true" />
+        </button>
         <button type="button" title="收起" @click="trackerActions.collapse">
           <X class="sgs-icon" aria-hidden="true" />
         </button>
       </div>
 
       <div ref="deckListRef" class="sgs-deck-list">
-        <template v-if="snapshot.isDeckActive">
+        <RuleConfigView
+          v-if="ui.ruleConfigOpen"
+          :system-rules="trackerStore.state.ruleConfig.systemRules"
+          :custom-rules="trackerStore.state.ruleConfig.customRules"
+          :error="trackerStore.state.ruleConfig.lastError"
+          @save-rule="trackerActions.saveCustomRule"
+          @toggle-rule="trackerActions.toggleCustomRule"
+          @remove-rule="trackerActions.removeCustomRule"
+        />
+        <template v-else-if="snapshot.isDeckActive">
           <CardGroup
             v-for="group in snapshot.groups"
             :key="group.type"

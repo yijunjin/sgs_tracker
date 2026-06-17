@@ -1,0 +1,238 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "public-card-use-play-discard-equip",
+      "description": "普通公开使用、打出、弃置、装备日志直接投影为记牌事件。",
+      "enabled": true,
+      "when": {
+        "path": "event.event",
+        "op": "in",
+        "value": ["OnCardUse", "OnCardPlay", "OnCardDiscard", "OnCardEquip"]
+      },
+      "actions": [
+        {
+          "type": "emitTrackerEvent",
+          "params": {
+            "action": "$event.trackerAction",
+            "cardRole": "card",
+            "note": "$event.note"
+          }
+        }
+      ]
+    },
+    {
+      "id": "judge-result-public-card",
+      "description": "判定结果是公开牌，计入已见牌。",
+      "enabled": true,
+      "when": {
+        "path": "event.event",
+        "op": "==",
+        "value": "OnJudgeResult"
+      },
+      "actions": [
+        {
+          "type": "emitTrackerEvent",
+          "params": {
+            "action": "judge",
+            "cardRole": "card",
+            "note": "判定结果公开牌"
+          }
+        }
+      ]
+    },
+    {
+      "id": "known-draw-pile-or-five-grain-gain",
+      "description": "从摸牌堆或五谷丰登公开获得具名牌，进入获得者的已知手牌。",
+      "enabled": true,
+      "when": {
+        "all": [
+          {
+            "path": "event.event",
+            "op": "==",
+            "value": "OnCardGain"
+          },
+          {
+            "path": "event.gainSource",
+            "op": "in",
+            "value": ["drawPile", "fiveGrain"]
+          }
+        ]
+      },
+      "actions": [
+        {
+          "type": "markCardVisible",
+          "params": {
+            "owner": "$event.player",
+            "zone": "hand",
+            "visibility": "owner-visible",
+            "cards": "$event.cards"
+          }
+        },
+        {
+          "type": "emitTrackerEvent",
+          "params": {
+            "action": "gainKnown",
+            "cardRole": "card",
+            "note": "$event.note"
+          }
+        }
+      ]
+    },
+    {
+      "id": "luoshen-zaiqi-judge-card-gain",
+      "description": "甄姬洛神、孟获再起等技能获得公开判定牌；牌进入获得者手牌且对我可见。",
+      "enabled": true,
+      "when": {
+        "all": [
+          {
+            "path": "event.event",
+            "op": "==",
+            "value": "OnCardGain"
+          },
+          {
+            "path": "event.gainSource",
+            "op": "==",
+            "value": "judge"
+          }
+        ]
+      },
+      "actions": [
+        {
+          "type": "markCardVisible",
+          "params": {
+            "owner": "$event.player",
+            "zone": "hand",
+            "visibility": "public-judge-gain",
+            "cards": "$event.cards"
+          }
+        },
+        {
+          "type": "emitTrackerEvent",
+          "params": {
+            "action": "gainKnown",
+            "cardRole": "card",
+            "note": "$event.note"
+          }
+        }
+      ]
+    },
+    {
+      "id": "region-public-card-gain",
+      "description": "从其他角色的手牌区、装备区、判定区获得公开牌，按已知手牌转移处理。",
+      "enabled": true,
+      "when": {
+        "all": [
+          {
+            "path": "event.event",
+            "op": "==",
+            "value": "OnCardGain"
+          },
+          {
+            "path": "event.gainSource",
+            "op": "==",
+            "value": "region"
+          }
+        ]
+      },
+      "actions": [
+        {
+          "type": "moveCardZone",
+          "params": {
+            "fromPlayer": "$event.sourcePlayer",
+            "toPlayer": "$event.player",
+            "fromZone": "$event.sourceZone",
+            "toZone": "hand",
+            "cards": "$event.cards"
+          }
+        },
+        {
+          "type": "emitTrackerEvent",
+          "params": {
+            "action": "gainKnown",
+            "cardRole": "card",
+            "sourcePlayerName": "$event.sourcePlayer",
+            "sourceZone": "$event.sourceZone",
+            "note": "$event.note"
+          }
+        }
+      ]
+    },
+    {
+      "id": "jizhi-expected-draw-pile-decrement",
+      "description": "黄月英集智类技能发动后预期从牌堆摸一张；由状态 adapter 决定是否扣减牌堆剩余。",
+      "enabled": true,
+      "when": {
+        "all": [
+          {
+            "path": "event.event",
+            "op": "==",
+            "value": "OnSkillInvoke"
+          },
+          {
+            "path": "event.skill",
+            "op": "in",
+            "value": ["集智"]
+          }
+        ]
+      },
+      "actions": [
+        {
+          "type": "decrementDrawPile",
+          "params": {
+            "amount": 1,
+            "reason": "{{event.player}}发动{{event.skill}}"
+          }
+        },
+        {
+          "type": "emitTrackerEvent",
+          "params": {
+            "action": "ignore",
+            "note": "技能发动事件已交由规则引擎处理。"
+          }
+        }
+      ]
+    },
+    {
+      "id": "conversion-card-use-original-card",
+      "description": "武圣、龙胆等转化牌：记牌扣除原始牌，同时保留虚拟使用牌意图。",
+      "enabled": true,
+      "when": {
+        "path": "event.event",
+        "op": "==",
+        "value": "OnCardConvert"
+      },
+      "actions": [
+        {
+          "type": "emitTrackerEvent",
+          "params": {
+            "action": "use",
+            "cardRole": "fromCard",
+            "virtualCardName": "$event.toCard.name",
+            "skillName": "$event.skill",
+            "note": "转化牌事件，按原始牌计入已见，并记录视为使用的目标牌。"
+          }
+        }
+      ]
+    },
+    {
+      "id": "compat-unknown-or-ignored-log",
+      "description": "兼容旧 ParsedLogEvent API：未知、忽略、暗摸牌数量事件仍返回非记牌事件，方便 UI 展示和人工确认。",
+      "enabled": true,
+      "when": {
+        "path": "event.event",
+        "op": "in",
+        "value": ["OnIgnoredLog", "OnUnknownLog", "OnCardDraw"]
+      },
+      "actions": [
+        {
+          "type": "emitTrackerEvent",
+          "params": {
+            "action": "$event.trackerAction",
+            "note": "$event.note"
+          }
+        }
+      ]
+    }
+  ]
+}
