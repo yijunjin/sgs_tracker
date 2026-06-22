@@ -1,4 +1,18 @@
 (() => {
+  /*
+   * pageHook.js 运行在三国杀页面的真实 JS 上下文中。
+   *
+   * 为什么不直接在 content.ts 里做这些事：
+   * Chrome content script 处在“隔离世界”，看不到页面里真实的 Laya 对象、WebSocket 构造器和协议事件。
+   * 所以 content.ts 会把本文件作为 <script> 注入页面，再通过 window.postMessage 把采集结果送回插件。
+   *
+   * 本文件只做三件事：
+   * 1. 采集公开文本：hook Laya 文本 setter/changeText，并定时扫 Laya stage。
+   * 2. 采集协议线索：hook Laya EventDispatcher.event 和 WebSocket 原始帧。
+   * 3. 做最小脱敏：离屏敌方暗摸牌只保留张数，rawText 留给 content.ts 判断“队友摸牌”等白名单。
+   *
+   * 真正的记牌、模式识别、去重和 UI 渲染都在 src/content.ts。
+   */
   const HOOK_VERSION = "extension-public-hook-v7-raw-protocol"
   const MAX_TEXT = 500
   const MAX_RECORDS = 5000
@@ -7,6 +21,7 @@
   const publicEventPattern = /^(Pub|Gs|Msg|Smsg|Game|Room|S2C|C2S|Net)/i
   const textPattern = /使用|打出|弃置|获得|判定|发动|受到|回复|濒死|杀的目标|托管|思考|请选择|请弃置|无懈可击|桃|闪|杀|系统|牌局|洗牌|剩余牌|牌堆|牌库|回合|轮|1v1|新1v1|一对一|一战到底|2v2|欢乐|欢乐成双|欢乐军争|房间模式|模式/
 
+  // Laya 文本可能带 HTML 标签或 &nbsp;，先统一成短文本，避免把整块富文本/DOM 片段传回插件。
   function cleanText(value) {
     if (value == null) return ""
     return String(value)
@@ -17,6 +32,8 @@
       .slice(0, MAX_TEXT)
   }
 
+  // 把 Laya 节点坐标换算成浏览器视口坐标。
+  // Laya stage 坐标和 canvas 实际显示尺寸可能有缩放，所以要乘 canvas rect/stage 宽高比例。
   function safePos(node) {
     try {
       const point = node.localToGlobal ? node.localToGlobal(new Laya.Point(0, 0)) : null
@@ -44,6 +61,8 @@
     }
   }
 
+  // 从日志中识别“某人从摸牌堆获得具体牌面”的文本。
+  // 这类文本如果属于敌方离屏暗摸，不能直接持久化完整牌面。
   function isExactDeckDraw(text) {
     const match = text.match(/^(.*?)从摸牌堆获得(.+)$/)
     if (!match) return null
@@ -59,6 +78,9 @@
     return parts.length || 1
   }
 
+  // 最小隐私/公平性保护：
+  // - “您”或当前可见节点的摸牌可以保留牌面；
+  // - 离屏敌方摸牌只保留“获得 N 张牌”，rawText 暂存给 content.ts 做队友白名单判断。
   function sanitizeTextForPersistence(text, pos) {
     const draw = isExactDeckDraw(text)
     if (!draw) return { text, redacted: false }
@@ -73,6 +95,8 @@
     }
   }
 
+  // postMessage 是 pageHook -> content.ts 的唯一通信通道。
+  // content.ts 会验证 source/hookVersion/record 后再进入业务处理。
   function emit(record) {
     window.postMessage(
       {
@@ -84,6 +108,8 @@
     )
   }
 
+  // 所有采集记录都先进入 window.__SGS_PUBLIC_HOOK__.records，方便页面控制台临时 drain() 调试；
+  // 同时立即 postMessage 给 content script。MAX_RECORDS 防止长时间挂机内存无限涨。
   function push(record) {
     const hook = window.__SGS_PUBLIC_HOOK__
     if (!hook) return
@@ -128,6 +154,8 @@
     }
   }
 
+  // WebSocket message/send 的 payload 可能是 string、ArrayBuffer、TypedArray 或 Blob。
+  // 这里统一转换成可 JSON 序列化的结构，保留 utf8/gb18030 两种解码以便排查协议编码。
   function normalizeBinaryPayload(value, done) {
     try {
       if (typeof value === "string") {
@@ -160,6 +188,8 @@
     }
   }
 
+  // 深拷贝协议对象时必须防循环、限深，并把二进制转成可读 payload。
+  // 这份 dataRaw 给 content.ts 解析字段，也给 collector 做离线复盘。
   function cloneRawValue(value, depth, seen) {
     if (value == null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") return value
     if (typeof value === "bigint") return value.toString()
@@ -200,6 +230,8 @@
     return output
   }
 
+  // WebSocket 原始抓包用于诊断协议格式，不直接参与记牌。
+  // 直接替换 window.WebSocket 和 prototype.send，因此一定要保留原型链和 originalSend 行为。
   function installRawWebSocketCapture() {
     try {
       if (window.__SGS_RAW_WS_CAPTURE_VERSION__ === HOOK_VERSION) return
@@ -239,6 +271,8 @@
     }
   }
 
+  // summary 只提取可能和模式/牌堆/玩家/牌有关的字段，供 content.ts 快速判断。
+  // 完整对象另走 raw-protocol-event，避免 summary 过大影响页面性能。
   function summarizeProtocolValue(value, depth) {
     if (value == null || typeof value === "boolean" || typeof value === "number") return value
     if (typeof value === "string") return value.slice(0, 80)
@@ -280,6 +314,9 @@
     }, 250)
   }
 
+  // 定时扫描 Laya stage 是 setter hook 的兜底：
+  // 有些节点在 hook 安装前已经存在，或文本没有通过 changeText 触发。
+  // 页面隐藏时降低频率，减少后台页资源消耗。
   function scheduleStageSampler() {
     const hook = window.__SGS_PUBLIC_HOOK__
     if (!hook || hook.sampleTimer) return
@@ -294,6 +331,7 @@
     hook.sampleTimer = window.setTimeout(tick, 0)
   }
 
+  // Laya 文本 hook 的统一入口：清洗文本、过滤无关内容、换算坐标、脱敏后发给 content.ts。
   function recordText(kind, value, node) {
     const text = cleanText(value)
     if (!text || !textPattern.test(text)) return
@@ -309,6 +347,8 @@
     })
   }
 
+  // 玩家名锚点候选：当前主要用于 collector 诊断玩家归属/坐标问题。
+  // 这里尽量排除日志/按钮/数字，保留短中文名或昵称，后续若恢复页面浮层也可复用。
   function isAnchorCandidate(text, pos) {
     if (!text || !pos || pos.visible === false) return false
     if (text.length < 2 || text.length > 18) return false
@@ -317,6 +357,7 @@
     return /[\u4e00-\u9fa5A-Za-z0-9_·•]/.test(text)
   }
 
+  // 安装主 hook。Laya 可能比插件脚本晚初始化，所以没拿到 Laya.EventDispatcher 时轮询等待。
   function install() {
     if (window.__SGS_PUBLIC_HOOK__ && window.__SGS_PUBLIC_HOOK__.version === HOOK_VERSION) {
       return
@@ -339,6 +380,7 @@
         try {
           if (!window.Laya || !Laya.stage) return
           const seenTexts = []
+          // 深度遍历 stage 树：从常见文本字段里提取内容，同时上报锚点候选和公开日志文本。
           const walk = (node, depth) => {
             if (!node || depth > 30) return
             const values = [node.text, node._text, node.htmlText, node._htmlText, node.innerHTML]
@@ -395,6 +437,8 @@
           if (typeof type === "string" && publicEventPattern.test(type)) {
             const dataSummary = summarizeProtocolData(data)
             const dataRaw = cloneRawValue(data, 0, [])
+            // protocol-event 是轻量摘要，raw-protocol-event 是完整可复盘数据。
+            // content.ts 会优先用 raw-protocol-event 改状态。
             push({ kind: "protocol-event", eventType: type, dataSummary })
             push({ kind: "raw-protocol-event", eventType: type, dataRaw })
           }
@@ -428,6 +472,7 @@
       return true
     }
 
+    // 有些 Laya 类用属性 setter 改文本，有些走 changeText 方法，所以两类都 patch。
     function patchMethod(Ctor, method, kind) {
       if (!Ctor || !Ctor.prototype || Ctor.prototype[`__sgsHookVersion_${method}`] === HOOK_VERSION) return false
       const original = Ctor.prototype[method]
@@ -484,6 +529,8 @@
     installRawWebSocketCapture()
   }
 
+  // 有的 UI 把“剩余牌”和数字拆成两个 Laya 文本节点。
+  // 这里根据坐标把附近数字合成“剩余牌 N”，让 content.ts 能当作普通文本信号处理。
   function synthesizeRemainingText(items, seenStageText, reason) {
     try {
       const labels = items.filter((item) => /剩余牌|牌堆|牌库/.test(item.text))

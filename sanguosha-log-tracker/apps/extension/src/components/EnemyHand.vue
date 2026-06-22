@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import type { EnemyHandView } from "../trackerStore"
 
+// 敌方已知手牌面板。
+// hands 已经在 content.ts 里过滤掉自己和队友，只保留仍处于 player-visible 的敌方牌。
+// 当敌人打出/弃置/装备这些牌时，业务层会把 zone 改成 public/equip，本组件自然不再显示。
 defineProps<{
   hands: EnemyHandView[]
 }>()

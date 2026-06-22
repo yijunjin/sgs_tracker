@@ -2,6 +2,9 @@
 import { ChevronDown, ChevronRight } from "lucide-vue-next"
 import type { CardGroupView } from "../trackerStore"
 
+// 一组牌（基本牌/锦囊牌/装备牌）的展示组件。
+// 业务层已经把“每张牌剩余多少、哪些实体牌已见、是否闪烁”算进 group.rows，
+// 这里只负责稳定地渲染行、格子和展开/收起交互。
 defineProps<{
   group: CardGroupView
 }>()

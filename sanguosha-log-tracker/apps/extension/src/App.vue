@@ -6,6 +6,9 @@ import EnemyHand from "./components/EnemyHand.vue"
 import RuleConfigView from "./components/RuleConfigView.vue"
 import { trackerActions, trackerStore, type SupportedGameModeId } from "./trackerStore"
 
+// App.vue 是插件面板的纯展示层：
+// - 所有业务计算都已经在 content.ts -> trackerStore.snapshot 里完成；
+// - 这里只读取 snapshot/ui，并把用户操作转发到 trackerActions。
 const deckListRef = ref<HTMLElement | null>(null)
 const eventLogRef = ref<HTMLElement | null>(null)
 const snapshot = computed(() => trackerStore.snapshot)
@@ -13,6 +16,8 @@ const ui = trackerStore.ui
 
 let removeResizeListeners: (() => void) | undefined
 
+// 新事件追加时，如果用户原本就在日志底部，则自动跟随滚动；
+// 如果用户正在回看旧日志，则不强行打断他的阅读位置。
 watch(
   () => [trackerStore.revision, ui.logCollapsed],
   async () => {
@@ -38,6 +43,8 @@ function toggleRuleConfig(): void {
   trackerActions.openRuleConfig()
 }
 
+// 右侧面板宽度拖拽。面板固定在屏幕右侧，所以鼠标往左拖时宽度增加：
+// startWidth + startX - currentX。
 function startResize(event: MouseEvent): void {
   event.preventDefault()
   const startX = event.clientX

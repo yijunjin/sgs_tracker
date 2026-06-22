@@ -1,9 +1,22 @@
 import { reactive } from "vue"
 import type { DeckCardEntry, ParsedLogEvent, RuleDefinition, TrackerState } from "@slt/shared"
 
+/**
+ * 插件 UI 的共享 store。
+ *
+ * 设计上分三层：
+ * - state：content.ts 的业务运行时状态镜像，保留给规则面板/调试读取。
+ * - snapshot：Vue 面板真正渲染的数据模型，已经被 content.ts 整理成“直接显示”的结构。
+ * - ui：纯 UI 偏好，例如面板宽度、折叠状态、分组展开状态。
+ *
+ * 这样组件不用理解协议、文本解析、牌堆校准等复杂业务，只负责展示 snapshot 和触发 actions。
+ */
+
 export type SupportedGameModeId = "sgs-happy-2v2" | "sgs-1v1"
 export type TrackingPhase = "waiting" | "detecting-mode" | "in-game" | "ended"
 
+// 与 content.ts 内部 ExactSeenCard 同构。这里导出是为了让 UI ViewModel 类型能描述
+// “一张实体牌当前在哪个区、归谁、是否需要闪烁”。
 export type ExactSeenCard = {
   id: string
   cardId?: number
@@ -17,6 +30,7 @@ export type ExactSeenCard = {
   pulseAt?: number
 }
 
+// 底部事件日志。event 是 parser 产出的结构化结果；没有 event 时仅作为提示/诊断文本。
 export type DisplayEvent = {
   id: string
   at: number
@@ -25,6 +39,7 @@ export type DisplayEvent = {
   event?: ParsedLogEvent
 }
 
+// 采集链路状态计数，主要显示在 UI 和导出诊断里。
 export type StatusState = {
   listening: boolean
   hookVersion: string
@@ -37,6 +52,7 @@ export type StatusState = {
   lastGameOverAt: number
 }
 
+// 这些字段不影响记牌业务，只影响面板如何展开、收起、调整宽度。
 export type TrackerUiState = {
   collapsed: boolean
   ruleConfigOpen: boolean
@@ -45,6 +61,7 @@ export type TrackerUiState = {
   openGroups: Record<string, boolean>
 }
 
+// 规则面板的状态。系统规则只读，自定义规则会持久化到 localStorage。
 export type RuleConfigState = {
   systemRules: RuleDefinition[]
   customRules: RuleDefinition[]
@@ -52,6 +69,9 @@ export type RuleConfigState = {
   lastSavedAt: number
 }
 
+// 以下 *View 类型是“给 Vue 直接渲染”的数据，不再包含复杂业务判断。
+// 例如 CardChipView.state 已经把 public/player-visible/equip 等区域算好，
+// 组件只需要按 state 选择 class。
 export type CardChipView = {
   key: string
   label: string
@@ -151,6 +171,7 @@ export type TrackerSnapshot = {
   waitingDetail: string
 }
 
+// trackerStore 是唯一 reactive 根对象。content.ts 会更新它，Vue 组件只读取它。
 export type TrackerStore = {
   revision: number
   ui: TrackerUiState
@@ -173,6 +194,7 @@ export type TrackerStore = {
   snapshot: TrackerSnapshot
 }
 
+// 默认状态要保持轻量、无业务副作用；真正开局后的 TrackerState 由 content.ts 创建。
 const defaultStatus: StatusState = {
   listening: true,
   hookVersion: "",
@@ -185,6 +207,7 @@ const defaultStatus: StatusState = {
   lastGameOverAt: 0
 }
 
+// 初始 snapshot 让面板在还没收到任何 pageHook 消息时也能正常渲染“等待开局”界面。
 export const trackerStore = reactive<TrackerStore>({
   revision: 0,
   ui: {
@@ -259,6 +282,8 @@ export const trackerStore = reactive<TrackerStore>({
   }
 })
 
+// actions 先放空函数，是为了让组件在 content.ts 绑定真实实现之前也不会报错。
+// bootstrap() 中的 bindTrackerActions() 会把这些占位函数替换成真正的业务动作。
 export const trackerActions = {
   collapse: () => {},
   expand: () => {},
@@ -276,6 +301,8 @@ export const trackerActions = {
   setPanelWidth: (_width: number, _persist = false) => {}
 }
 
+// content.ts 每次构造完新 snapshot 后调用这里。
+// revision 专门给需要监听“快照已替换”的逻辑使用，例如 App.vue 自动滚动日志到底部。
 export function replaceTrackerSnapshot(snapshot: TrackerSnapshot): void {
   trackerStore.snapshot = snapshot
   trackerStore.revision += 1

@@ -3,6 +3,8 @@ import { ChevronDown, ChevronRight, Edit3, Plus, Save, Trash2 } from "lucide-vue
 import { computed, reactive, ref } from "vue"
 import type { GameEventName, RuleAction, RuleCondition, RuleDefinition, RuleOperator } from "@slt/shared"
 
+// 规则配置面板：把“用户能理解的表单字段”转换成 shared/ruleEngine 能执行的 RuleDefinition。
+// 这里不直接修改 localStorage，也不直接刷新 rule library；保存/启停/删除都通过 emit 交给 content.ts。
 const props = defineProps<{
   systemRules: RuleDefinition[]
   customRules: RuleDefinition[]
@@ -15,6 +17,8 @@ const emit = defineEmits<{
   removeRule: [ruleId: string]
 }>()
 
+// 表单态比 RuleDefinition 更扁平，因为 UI 每次只编辑一个触发事件、一个附加条件和一个动作。
+// 提交时再由 buildCondition()/buildAction() 拼回规则引擎的结构。
 type RuleForm = {
   id: string
   description: string
@@ -35,6 +39,7 @@ type RuleForm = {
   zone: string
 }
 
+// 下拉项使用显式 label，避免把内部事件名/字段路径暴露给普通使用者。
 const eventOptions: Array<{ value: GameEventName; label: string }> = [
   { value: "OnSkillInvoke", label: "技能发动" },
   { value: "OnCardGain", label: "获得牌" },
@@ -83,6 +88,8 @@ const systemCount = computed(() => props.systemRules.length)
 const customCount = computed(() => props.customRules.length)
 const editorTitle = computed(() => (editingExistingId.value ? "编辑规则" : "新增规则"))
 
+// 默认给一个“集智扣一张牌堆”的模板，原因是这类规则最常见，
+// 用户新增时能直接看懂字段之间的关系，再改成自己的技能。
 function createEmptyForm(): RuleForm {
   return {
     id: `custom-${Date.now().toString(36)}`,
@@ -121,6 +128,11 @@ function toggle(ruleId: string): void {
   }
 }
 
+// 条件值在表单里永远是字符串；提交给规则引擎前需要按操作符转成：
+// - exists：不需要 value；
+// - in：逗号分隔数组；
+// - 纯数字：number；
+// - 其他：原字符串。
 function parseConditionValue(formValue: RuleForm): string | string[] | number | boolean | undefined {
   if (formValue.conditionOp === "exists") {
     return undefined
@@ -135,6 +147,8 @@ function parseConditionValue(formValue: RuleForm): string | string[] | number | 
   return formValue.conditionValue.trim() !== "" && Number.isFinite(numeric) ? numeric : formValue.conditionValue.trim()
 }
 
+// 所有自定义规则都至少限定 event.event，否则会对任意事件生效。
+// 如果用户勾选“附加条件”，再用 all 把事件类型条件和字段条件组合起来。
 function buildCondition(): RuleCondition {
   const eventCondition: RuleCondition = {
     path: "event.event",
@@ -154,6 +168,8 @@ function buildCondition(): RuleCondition {
   }
 }
 
+// 把 UI 选择的动作类型转成规则引擎动作。
+// params 里以 "$event.xxx" 开头的值不是普通字符串，而是规则执行时从事件对象取值的占位符。
 function buildAction(): RuleAction {
   if (form.actionType === "decrementDrawPile") {
     return {
@@ -197,6 +213,7 @@ function buildAction(): RuleAction {
   }
 }
 
+// submit 只负责发出 RuleDefinition。校验、去重、持久化由 content.ts 的 saveCustomRule 完成。
 function submitRule(): void {
   emit("saveRule", {
     id: form.id.trim(),
@@ -208,6 +225,9 @@ function submitRule(): void {
   })
 }
 
+// 下面几个函数用于把已保存的 RuleDefinition 反解回表单。
+// 当前 UI 支持的规则是“一事件 + 一附加条件 + 一动作”的简单形态；
+// 更复杂的 all/any/not 会尽量取第一个可编辑条件展示。
 function findCondition(condition: RuleCondition | undefined, path: string): RuleCondition | undefined {
   if (!condition) return undefined
   if ("path" in condition && condition.path === path) return condition
@@ -260,6 +280,7 @@ function editRule(rule: RuleDefinition): void {
   })
 }
 
+// 规则详情里的可读文案。这里不影响规则执行，只帮助用户确认配置内容。
 function pathLabel(path: string): string {
   return pathOptions.find((item) => item.value === path)?.label ?? path
 }

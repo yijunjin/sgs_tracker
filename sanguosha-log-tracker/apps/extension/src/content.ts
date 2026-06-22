@@ -40,6 +40,23 @@ import {
   type TrackerSnapshot
 } from "./trackerStore"
 
+/**
+ * content script 是插件的主控层，运行在三国杀网页的隔离世界里。
+ *
+ * 数据流从下往上看大概是：
+ * 1. bootstrap() 把 public/pageHook.js 注入到页面真实上下文。
+ * 2. pageHook.js 监听 Laya 文本、Laya 协议事件、WebSocket 原始帧，并用 window.postMessage 发回这里。
+ * 3. handleHookRecord() 按 record.kind 分流：协议事件优先、文本事件兜底、锚点事件用于诊断/未来定位能力。
+ * 4. ingest* 系列函数把原始信号转成 TrackerState、seenExactCards、displayEvents 等运行时状态。
+ * 5. buildTrackerSnapshot() 把复杂运行时状态压成 Vue 组件直接可渲染的 ViewModel。
+ *
+ * 注意：这里同时承担“插件桥接层”和“记牌业务层”，所以注释会更偏向解释边界、
+ * 数据来源可信度、以及为什么要保留某些看似重复的状态。
+ */
+
+// pageHook.js 发回来的最小事件单元。字段很多是可选的，因为不同来源只能提供部分信息：
+// 文本 hook 主要提供 text/rawText/pos；协议 hook 主要提供 eventType/dataRaw；
+// WebSocket 抓包主要提供 direction/wsUrl/payload。
 type HookRecord = {
   at: number
   kind: string
@@ -58,6 +75,7 @@ type HookRecord = {
   sampleReason?: string
 }
 
+// postMessage 的外层包。source 用来区分主 frame 和 iframe 转发，hookVersion 用于排查旧 hook 未刷新。
 type HookMessage = {
   source: "sgs-tracker-page-hook" | "sgs-tracker-frame-hook"
   hookVersion: string
@@ -65,6 +83,7 @@ type HookMessage = {
   record: HookRecord
 }
 
+// UI 底部日志使用的轻量事件。真正会改变牌堆的事件放在 event 里，纯诊断/提示只展示 text。
 type DisplayEvent = {
   id: string
   at: number
@@ -73,6 +92,12 @@ type DisplayEvent = {
   event?: ParsedLogEvent
 }
 
+// “精确已见牌”表示我们已经知道一张实体牌的名称、花色、点数、当前位置。
+// 和 TrackerState 里的按名称计数不同，这里尽量追踪到“某一张实体牌”，用于：
+// - 判断同名牌的不同花色/点数是否已见；
+// - 敌方已知手牌列表；
+// - 牌区动画高亮 pulseAt；
+// - 洗牌/回收时把实体状态移动回牌堆。
 type ExactSeenCard = {
   id: string
   cardId?: number
@@ -113,6 +138,8 @@ type GuanxingExportCard = {
   rank?: string
 }
 
+// pageHook.js 会把 Laya 节点坐标换算到浏览器视口坐标。当前敌方手牌已并入面板展示，
+// 坐标主要保留给 collector 诊断和后续如果恢复页面浮层时复用。
 type LayaPosition = {
   x: number
   y: number
@@ -160,6 +187,8 @@ type RecentHandProtocolMove = {
   boundText?: boolean
 }
 
+// 缔盟等“整把手牌临时挪走再给别人”的技能，会导致已知手牌在短时间内换 owner。
+// 这里先暂存来源玩家的已知手牌，等协议里的目标座位出现后再落到目标玩家。
 type PendingDimengHand = {
   ownerKey: string
   ownerLabel: string
@@ -190,6 +219,8 @@ type DiagnosticHookRecord = Pick<
 type SupportedGameModeId = "sgs-happy-2v2" | "sgs-1v1"
 type TrackingPhase = "waiting" | "detecting-mode" | "in-game" | "ended"
 
+// 发给本机 collector 的诊断快照结构。collector 是可选辅助服务：
+// 插件没有 collector 也能正常工作，有 collector 时可以保存原始 hook 记录便于复盘问题。
 type CollectorDiagnostics = {
   href: string
   title: string
@@ -224,21 +255,36 @@ const MAX_PANEL_WIDTH = 760
 const IS_TOP_FRAME = isTopFrame()
 const PAGE_INSTANCE_ID = createPageInstanceId()
 
+// 当前牌局使用的牌堆模板。模式未识别前使用 defaultDeckProfile，
+// 识别到 1v1/2v2 后切换到对应 deckProfile，并重建 TrackerState。
 let deckProfile = defaultDeckProfile
 let deckProfileSource = "等待识别"
 let trackerState: TrackerState = createInitialTrackerState(deckProfile)
+
+// 模式锁有两种来源：
+// - manualModeLocked：用户在面板里手动点了 1v1/2v2，后续页面文本不再覆盖。
+// - protocolModeLocked：协议已经给出高置信模式，文本识别不再抢占。
 let gameModeId: SupportedGameModeId | undefined
 let gameModeSource = "等待页面模式信号"
 let manualModeLocked = false
 let protocolModeLocked = false
+
+// 对局生命周期。hasInGameSignal 比 trackingPhase 更粗：只表示已经看到过开局相关信号，
+// 用于判断“刚刚 game over 后又出现开局信号”时是否自动 reset。
 let trackingPhase: TrackingPhase = "waiting"
 let hasInGameSignal = false
+
+// drawPileRemaining 是“摸牌堆剩余张数”的独立估计，不完全等价于 remainingTotal：
+// remainingTotal 是从可见/已见牌反推，drawPileRemaining 尽量跟协议里的牌堆移动同步。
 let drawPileRemaining: number | undefined
 let drawPileRemainingSource = ""
 // 牌堆剩余是否已“校准”：只有从开局牌表(seedProtocolDeck)起算、或经一次洗牌锚点重置后才为 true。
 // 中途接入旁观（未收到开局 52 张牌表）时为 false，此时累加值仅供参考、不可信，UI 标注“未校准”。
 let drawPileCalibrated = false
 let midGameBaseline = false
+
+// 这些 queued 标记用于把高频 hook 事件合并成较少的 DOM/网络工作。
+// Laya 文本和 WebSocket 帧可能在一秒内触发很多次，直接同步渲染会拖慢游戏页面。
 let renderQueued = false
 let collectorQueued = false
 let lastCollectorPostAt = 0
@@ -251,6 +297,8 @@ let vueApp: VueApp<Element> | undefined
 let customRules: RuleDefinition[] = loadCustomRules()
 let activeRuleLibrary: RuleLibrary = createRuleLibrary(customRules)
 
+// localStorage 只存 UI 偏好和用户规则。真正的牌局状态不持久化，
+// 避免刷新页面后把上一局的已见牌误带入新页面。
 trackerStore.ui.logCollapsed = loadBoolean(LOG_COLLAPSED_STORAGE_KEY, false)
 trackerStore.ui.panelWidth = loadNumber(PANEL_WIDTH_STORAGE_KEY, 388)
 trackerStore.state.ruleConfig.systemRules = systemRuleLibrary.rules
@@ -259,8 +307,15 @@ const openGroups: Record<string, boolean> = trackerStore.ui.openGroups
 
 const status = trackerStore.state.status
 
+// Chrome 扩展热更新/重新加载后，旧 content script 里的 chrome.runtime.getURL 可能抛错。
+// 一旦检测到上下文失效，就停止依赖 runtime URL 和心跳，避免控制台刷异常。
 let extensionContextValid = true
 
+// 下列数组/Map 是运行时内存索引：
+// - displayEvents：底部日志；
+// - seenExactCards：当前周期内“实体牌”的可见状态；
+// - recent*：诊断/去重窗口；
+// - playerLabels/Anchors：把协议座位、文本玩家名、Laya 坐标逐步拼起来，方便诊断归属问题。
 const displayEvents = trackerStore.state.displayEvents as DisplayEvent[]
 const seenExactCards = trackerStore.state.seenExactCards as ExactSeenCard[]
 const recentHookRecords: DiagnosticHookRecord[] = []
@@ -284,6 +339,9 @@ let selfFigure: number | undefined
 // 其玩家必是我方（敌方摸牌不下发牌面，服务端反作弊），据此即可解禁，无需依赖座位映射。
 const allyPlayerKeys = new Set<string>(["__self__"])
 const rawCollectorBuffer: DiagnosticHookRecord[] = []
+
+// 协议 cardId -> DeckCardEntry 的可靠映射预留表。
+// 当前版本不会按位置猜花色点数；只有未来拿到权威映射来源时才写入这里。
 const protocolCardEntriesById = new Map<number, DeckCardEntry>()
 const protocolCardZonesById = new Map<number, number>()
 const recentProtocolMoveTimes = new Map<string, number>()
@@ -358,6 +416,8 @@ function createPageInstanceId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
+// 牌名展示顺序不是按字典序，而是按玩家读牌时的常用优先级：
+// 基本牌 -> 常见锦囊 -> 装备/坐骑。这样 UI 扫描成本最低。
 const cardDisplayOrder = new Map<string, number>(
   [
     "杀",
@@ -423,6 +483,10 @@ const exactCardAliases: Record<string, string> = {
 
 const delayedTrickNames = new Set<CardName>(["乐不思蜀", "兵粮寸断", "闪电"])
 
+// -----------------------------
+// 通用小工具与用户规则持久化
+// -----------------------------
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
@@ -450,6 +514,8 @@ function isValidRule(value: unknown): value is RuleDefinition {
   return value.actions.every((action) => isRecord(action) && typeof action.type === "string" && action.type.trim().length > 0)
 }
 
+// 用户规则从 localStorage 读出时必须“宽进严出”：
+// localStorage 可能被手动编辑，或旧版本留下不完整字段，所以先做结构校验再补默认值。
 function normalizeRule(value: RuleDefinition): RuleDefinition {
   return {
     ...value,
@@ -492,6 +558,8 @@ function refreshRuleLibrary(): void {
   trackerStore.state.ruleConfig.customRules = [...customRules]
 }
 
+// 所有扩展资源 URL 都从这里拿，集中处理“扩展上下文失效”的情况。
+// 这比到处 try/catch chrome.runtime.getURL 更容易维护，也避免旧 content script 反复报错。
 function runtimeUrl(path: string): string {
   if (!extensionContextValid) {
     return ""
@@ -507,6 +575,10 @@ function runtimeUrl(path: string): string {
     return ""
   }
 }
+
+// -----------------------------
+// 牌面展示与观星文本解析
+// -----------------------------
 
 function cardShortName(name: string): string {
   const map: Record<string, string> = {
@@ -644,6 +716,8 @@ function guanxingCardsTip(label: string, cards: GuanxingCard[], hint: string): s
   return [label, hint, ...rows].filter(Boolean).join("\n")
 }
 
+// 观星协议只告诉我们 cardId 的移动方向；页面文本有时会补充“牌面详情”。
+// 因此这里把文本解析到的详情挂到尚未有 detail 的 guanxingTop/Bottom 条目上。
 function fillGuanxingDetails(queue: GuanxingCard[], details: GuanxingCardDetail[], edge: "head" | "tail"): GuanxingCardDetail[] {
   if (!details.length) {
     return []
@@ -711,6 +785,9 @@ function guanxingCardDetailsFromContent(content: string): GuanxingCardDetail[] {
   return details
 }
 
+// 处理类似“将 X 张牌置于牌堆顶/底”的公开文本。
+// 这类文本可以补齐观星卡牌详情，但不作为牌堆移动的权威来源；
+// 真正的顺序仍以协议里的 FromZone/ToZone/ToPosition 为准。
 function ingestGuanxingPlacementText(text: string, at: number): boolean {
   if (!/置于牌堆[顶底]/u.test(text)) {
     return false
@@ -744,6 +821,10 @@ function ingestGuanxingPlacementText(text: string, at: number): boolean {
 function totalCards(): number {
   return getDeckTotalCount(deckProfile)
 }
+
+// -----------------------------
+// 对局模式与生命周期
+// -----------------------------
 
 function deckProfileById(id: SupportedGameModeId): typeof deckProfile | undefined {
   return deckProfiles.find((profile) => profile.id === id)
@@ -790,6 +871,8 @@ function resetRoundCounters(): void {
   status.lastGameOverAt = 0
 }
 
+// 新一局开始时清掉“上一局才有意义”的状态，但保留已经识别/手动锁定的模式。
+// options.clearProtocolDeck 用于处理协议明确给出新牌表的情况：此时旧 cardId 映射必须全部作废。
 function resetRoundStateForNewGame(at: number, source: string, options: { clearProtocolDeck?: boolean } = {}): void {
   trackerState = createInitialTrackerState(deckProfile)
   drawPileRemaining = undefined
@@ -839,6 +922,8 @@ function resetGuanxingState(): void {
   guanxingAt = 0
 }
 
+// 切换模式时会同步切换 deckProfile。注意：这不是单纯改 UI 标签，
+// 因为 1v1 / 2v2 的牌堆数量和卡牌集合不同，必须重建 TrackerState。
 function setGameMode(id: SupportedGameModeId, source: string): boolean {
   const nextProfile = deckProfileById(id)
   if (!nextProfile) {
@@ -861,6 +946,8 @@ function setGameMode(id: SupportedGameModeId, source: string): boolean {
   return changed
 }
 
+// 文本模式识别是弱信号：页面标题/模式文字可能短暂出现或重复出现。
+// 如果用户手动锁定或协议已锁定，这里不会覆盖当前模式。
 function detectGameModeIdFromText(text: string): SupportedGameModeId | undefined {
   const normalized = text.replace(/\s+/g, "").toLowerCase()
   if (/1v1|新1v1|一对一|一战到底/.test(normalized)) {
@@ -872,6 +959,8 @@ function detectGameModeIdFromText(text: string): SupportedGameModeId | undefined
   return undefined
 }
 
+// 协议模式识别是强信号，优先从 Mode/Room/GameType 等字段里找。
+// pageHook.js 只做轻量 summary，content.ts 才决定是否切换具体 deckProfile。
 function detectGameModeIdFromRecord(record: HookRecord): SupportedGameModeId | undefined {
   if (record.text) {
     const textMode = detectGameModeIdFromText(record.text)
@@ -916,6 +1005,10 @@ function markInGameSignal(record: HookRecord): boolean {
   }
   return false
 }
+
+// -----------------------------
+// 牌堆计数、精确牌抽取与协议 cardId 映射
+// -----------------------------
 
 function cycleRemainingTotal(): number {
   return Math.max(0, totalCards() - seenExactCards.length)
@@ -1045,6 +1138,8 @@ function exactCardNamesByLength(): Array<{ alias: string; canonical: string }> {
   return [...names, ...aliases].sort((left, right) => right.alias.length - left.alias.length)
 }
 
+// 从公开文本里抓“带花色点数”的牌，例如 杀♠7、桃♥6。
+// 只有带花色点数的文本才会生成 ExactSeenCard；“获得 2 张牌”这种暗牌只走计数逻辑。
 function extractExactSeenCards(text: string, at: number): ExactSeenCard[] {
   const names = exactCardNamesByLength()
   if (names.length === 0) {
@@ -1116,6 +1211,8 @@ function numberArrayValue(value: unknown): number[] {
   return value.map(numberValue).filter((item): item is number => item !== undefined)
 }
 
+// pageHook.js 对 raw-protocol-event 的 dataRaw 会尽量深拷贝原始对象。
+// 不同协议事件有的把真正消息放在 msg 字段，有的自身就是消息体，所以这里统一拆出消息对象。
 function rawProtocolMessage(record: HookRecord): Record<string, unknown> | undefined {
   if (!isObjectRecord(record.dataRaw)) {
     return undefined
@@ -1134,6 +1231,9 @@ function protocolCardEntry(cardId: number): DeckCardEntry | undefined {
   return protocolCardEntriesById.get(cardId)
 }
 
+// 开局牌表是最可信的校准点：拿到完整 cardIds 后，
+// drawPileRemaining 可以从牌表对应的总张数开始扣。当前版本不建立 cardId→花色点数映射，
+// 因为协议牌表顺序与本地牌表顺序没有可靠对应关系，宁可少点亮，也不误点亮。
 function seedProtocolDeck(cardIds: number[], at: number): boolean {
   if (!cardIds.length) {
     return false
@@ -1239,6 +1339,8 @@ function consumeGuanxingTopOnDraw(drawnCount: number): void {
   guanxingTop.splice(0, Math.min(drawnCount, guanxingTop.length))
 }
 
+// 协议移动如果能解析到实体牌，就把它合并进 seenExactCards。
+// 合并规则比“直接 push”复杂，是为了避免同一张牌从暗手牌 -> 公开区时被计两次。
 function markProtocolCardSeen(cardId: number, toZone: number | undefined, at: number, sourceText: string, ownerSeatId?: number): boolean {
   const card = protocolCardEntry(cardId)
   if (!card) {
@@ -1417,6 +1519,8 @@ function updateDrawPileRemainingFromProtocolMove(
   return true
 }
 
+// 有些协议移动会被 Laya 事件系统重复派发；签名只取影响记牌状态的字段，
+// 短时间内同签名视为重复，避免一张牌被扣两次。
 function protocolMoveSignature(msg: Record<string, unknown>): string {
   const cardIds = numberArrayValue(msg.CardIDs).join(",")
   return [
@@ -1464,6 +1568,9 @@ function rememberHandProtocolMove(move: RecentHandProtocolMove): void {
   }
 }
 
+// 文本里有玩家名，协议里有座位号；两者通常不是同一个事件同时给全。
+// recentHandProtocolMoves 是一个短时间窗口：当文本事件到来时，回看附近的手牌协议移动，
+// 把“某座位”绑定到“某玩家名/武将名”，后续敌方已知手牌浮窗才知道挂到谁身上。
 function parsedEventCardCount(event: Pick<ParsedLogEvent, "cardName" | "cardNames">): number {
   return event.cardNames?.length ?? (event.cardName ? 1 : 0)
 }
@@ -1542,10 +1649,16 @@ function bindSeatsFromParsedTextEvent(event: ParsedLogEvent, at: number): boolea
   return changed
 }
 
+// -----------------------------
+// 已知手牌与特殊手牌转移
+// -----------------------------
+
 function knownCardTotal(cards: Record<CardName, number>): number {
   return Object.values(cards).reduce((sum, count) => sum + Math.max(0, count), 0)
 }
 
+// 缔盟会把一名玩家整把手牌先移动到临时区，再放到另一名玩家手里。
+// 对记牌器来说，这意味着“已知手牌 owner”要跟着换，而不是把旧 owner 的牌清掉。
 function takeDimengKnownHand(fromSeatId: number | undefined, at: number): boolean {
   const binding = seatBinding(fromSeatId)
   if (!binding || fromSeatId === undefined || pendingDimengHands.has(fromSeatId)) {
@@ -1649,6 +1762,11 @@ function ensureRoundActiveFromRawProtocol(record: HookRecord, reason: string): b
   return true
 }
 
+// 原始协议入口。这里尽量只做“协议字段 -> 运行时状态”的转换：
+// - GAME_OVER/ShowFigure：维护座位/阵营注册表；
+// - MsgGamePlayCardNtf：识别完整牌表和新局；
+// - PubGsCMoveCard：处理摸牌堆、观星、洗牌、缔盟和可见实体牌。
+// 文本解析不会走这里，避免把协议可信度和页面文案混在一起。
 function ingestRawProtocolRecord(record: HookRecord): boolean {
   if (record.kind !== "raw-protocol-event" || !record.eventType) {
     return false
@@ -1761,6 +1879,10 @@ function ingestRawProtocolRecord(record: HookRecord): boolean {
   }
   return changed
 }
+
+// -----------------------------
+// 座位、玩家名、阵营与页面锚点
+// -----------------------------
 
 function playerKeyOf(playerName?: string): string | undefined {
   return canonicalPlayerKey(playerName)
@@ -1914,6 +2036,8 @@ function seatBinding(seatId: number | undefined): SeatPlayerBinding | undefined 
   return { key, label, at: 0, source: "seat-registry" }
 }
 
+// Laya stage 里采到的“候选玩家名”可能带“您”、空白或装饰符。
+// 归一化后再和 playerLabelsByKey 匹配，降低玩家名显示差异造成的锚点匹配失败。
 function normalizeAnchorText(text: string): string {
   return text.replace(/（您）/gu, "").replace(/您/gu, "").replace(/\s+/g, "").trim()
 }
@@ -2057,6 +2181,10 @@ function exactTokensForEvent(event: ParsedLogEvent, at: number): ExactSeenCard[]
   return extractExactSeenCards(event.rawText, at)
 }
 
+// -----------------------------
+// 文本事件落库：ParsedLogEvent -> TrackerState / seenExactCards
+// -----------------------------
+
 function hasExactTokenForEvent(event: ParsedLogEvent, at: number): boolean {
   return exactTokensForEvent(event, at).length > 0
 }
@@ -2128,6 +2256,10 @@ function restoreVisibleExactCardsForOwner(cards: ExactSeenCard[], ownerLabel: st
   }
 }
 
+// 把一张精确牌写入 seenExactCards。这个函数是“去重/迁移”的核心：
+// - 同一张手牌被看见后又被打出，要从 player-visible 迁到 public；
+// - 装备/判定/技能牌堆属于场上占用，洗牌时不能清除；
+// - 若已经达到牌堆里该花色点数的最大副本数，则拒绝重复写入。
 function upsertExactCardState(card: ExactSeenCard, zone: ExactSeenCard["zone"], event: ParsedLogEvent): boolean {
   const key = exactCardKey(card)
   const sourceKey = `${key}|${zone}|${event.rawText}`
@@ -2198,6 +2330,8 @@ function upsertExactCardState(card: ExactSeenCard, zone: ExactSeenCard["zone"], 
   return true
 }
 
+// 一个文本事件可能包含多张精确牌。shared 的 applyEvent 以单牌事件为主，
+// 所以这里把多牌事件拆成多个 synthetic ParsedLogEvent 再逐个应用。
 function applyExactTokenEvent(baseEvent: ParsedLogEvent, token: ExactSeenCard, index: number): ParsedLogEvent {
   const { cardNames: _cardNames, ...singleCardEvent } = baseEvent
   void _cardNames
@@ -2355,6 +2489,8 @@ function removeVisibleHandExactCardsForOwner(ownerKey: string): boolean {
   return changed
 }
 
+// “展示/观看手牌”是一个快照事件：它告诉我们某个玩家此刻手里有哪些牌。
+// 所以同一 owner 的旧展示快照要先移除，再用最新文本重建，避免旧手牌残留。
 function ingestVisibleExactText(text: string, at: number): boolean {
   if (!isHandRevealText(text)) {
     return false
@@ -2425,6 +2561,10 @@ function fallbackVariant(card: DeckCardRow, index: number): DeckCardEntry {
   }
 }
 
+// -----------------------------
+// Vue 展示层 ViewModel 构造
+// -----------------------------
+
 function exactZoneLabel(state: ExactCardZone | "remaining"): string {
   if (state === "public") {
     return "弃牌/公开区"
@@ -2444,6 +2584,8 @@ function exactZoneLabel(state: ExactCardZone | "remaining"): string {
   return "未见"
 }
 
+// 把 DeckCardEntry + 当前状态转换成单个小格子的展示数据。
+// Vue 组件不再关心业务状态，只根据 state/isRed/pulsing/title 渲染样式。
 function chipView(card: DeckCardEntry, state: ExactCardZone | "remaining", index: number, pulsing: boolean): CardChipView {
   const zoneName = exactZoneLabel(state)
   return {
@@ -2458,6 +2600,8 @@ function chipView(card: DeckCardEntry, state: ExactCardZone | "remaining", index
   }
 }
 
+// 一行牌可能有多张同名不同花色点数的实体牌。这里把 seenExactCards 映射回 deckProfile
+// 里的变体下标，保证“哪一张已见/哪一张闪烁”尽量稳定。
 function chipViews(card: DeckCardRow): { chips: CardChipView[]; overflowCount: number } {
   const maxVisible = 48
   const exactSeen = seenExactCards.filter((item) => item.name === card.name)
@@ -2618,6 +2762,8 @@ function waitingDetail(): string {
       : "监听页面中，识别到 2v2 或 1v1 后开始记牌"
 }
 
+// content.ts 内部状态比较复杂；Vue 只消费这个快照。
+// 这样 UI 组件保持“纯展示”，业务决策集中在 content.ts，调试时也可以直接导出 snapshot 看全貌。
 function buildTrackerSnapshot(): TrackerSnapshot {
   const deckActive = isDeckActive()
   const modeLabel = supportedModeLabel(gameModeId)
@@ -2665,6 +2811,8 @@ function buildTrackerSnapshot(): TrackerSnapshot {
   }
 }
 
+// Vue store 是 reactive 对象，不能整棵随意替换深层业务状态。
+// 这里把模块级变量同步进 store，再用 replaceTrackerSnapshot 增加 revision 触发 UI 更新。
 function syncReactiveState(): void {
   trackerStore.state.trackingPhase = trackingPhase
   trackerStore.state.hasInGameSignal = hasInGameSignal
@@ -2679,6 +2827,8 @@ function syncReactiveState(): void {
   replaceTrackerSnapshot(buildTrackerSnapshot())
 }
 
+// 面板挂在 shadow DOM，避免网页原有 CSS 污染插件 UI，也避免插件样式影响游戏页面。
+// content.css 里原本按 id 写选择器，注入 shadow 后替换成 class 选择器以匹配 App 根节点。
 function mountVuePanel(): void {
   const host = ensureRootHost()
   if (vueApp) {
@@ -2916,6 +3066,8 @@ function currentStateSignature(): string {
   ].join("~")
 }
 
+// 渲染后的状态变化也会上报 collector，便于比对“内部状态变了但 UI 没变”这类问题。
+// signature 只取关键字段和最近实体牌尾巴，避免每次都序列化完整状态。
 function queueRenderStateSnapshot(): void {
   const signature = currentStateSignature()
   if (signature === lastRenderStateSignature) {
@@ -2925,6 +3077,8 @@ function queueRenderStateSnapshot(): void {
   queueCollectorSnapshot("render-state", true)
 }
 
+// 手动重置入口。preserveMode 用在“上一局结束后又检测到新开局”：
+// 保留已识别模式，清空本局牌状态，让用户不必每局重新点模式。
 function resetTracker(options: { preserveMode?: boolean } = {}): void {
   const preservedMode = options.preserveMode ? gameModeId : undefined
   const preservedProfile = preservedMode ? deckProfileById(preservedMode) : undefined
@@ -2963,6 +3117,8 @@ function resetTracker(options: { preserveMode?: boolean } = {}): void {
   queueCollectorSnapshot("reset", true)
 }
 
+// 局末清理比完整 reset 更轻：保留模式和日志里的 game-over 信息，
+// 但清掉本局实体牌、座位锚点、协议 cardId 等会污染下一局的状态。
 function clearRoundStateForGameOver(): void {
   trackerState = createInitialTrackerState(deckProfile)
   drawPileRemaining = undefined
@@ -2978,6 +3134,8 @@ function clearRoundStateForGameOver(): void {
   queueKnownHandOverlayRender(true)
 }
 
+// 保存最近 hook 记录用于诊断，同时对 raw 协议单独做短批量上报。
+// 这里不改变记牌状态，只维护“可解释性”的证据链。
 function pushRecentHookRecord(record: HookRecord): void {
   const item: DiagnosticHookRecord = {
     at: record.at,
@@ -3019,6 +3177,8 @@ function pushRecentHookRecord(record: HookRecord): void {
   }
 }
 
+// 导出/collector 使用的快照会比 Vue snapshot 更完整，包含原始诊断窗口和内部状态。
+// 面板展示用 buildTrackerSnapshot；复盘问题用 buildExportPayload。
 function buildDiagnostics(): CollectorDiagnostics {
   const now = Date.now()
   return {
@@ -3191,7 +3351,12 @@ function pushDisplayEvent(item: Omit<DisplayEvent, "id">): void {
   }
 }
 
+// -----------------------------
+// HookRecord 分流：文本、协议、生命周期
+// -----------------------------
+
 function updateDrawPileRemainingFromText(text: string, at: number, kind: string): boolean {
+  void kind
   let changed = false
   if (!gameModeId && !manualModeLocked) {
     changed = maybeSwitchDeckProfileFromText(text) || changed
@@ -3202,6 +3367,8 @@ function updateDrawPileRemainingFromText(text: string, at: number, kind: string)
   return changed
 }
 
+// Laya 文本 hook 会在 setText、changeText、stage 扫描里多次看到同一行。
+// 这里用短时间窗口去重，避免同一条日志重复进 parser。
 function shouldSkipTextRecord(record: HookRecord): boolean {
   if (!record.text) {
     return true
@@ -3226,6 +3393,8 @@ function shouldSkipTextRecord(record: HookRecord): boolean {
   return false
 }
 
+// 文本入口：先做模式/局末/审查处理，再交给 parser 和精确牌兜底逻辑。
+// 协议负责牌堆数；文本主要负责“哪些牌对玩家可见”。
 function ingestTextRecord(record: HookRecord): boolean {
   if (!record.text || shouldSkipTextRecord(record)) {
     return false
@@ -3282,6 +3451,8 @@ function ingestUnredactedTextRecord(record: HookRecord, at: number): boolean {
 
   changed = moveActiveJudgeCardToPublic(record.text, at) || changed
   changed = ingestGuanxingPlacementText(record.text, at) || changed
+  // shared parser 负责把自然语言日志转成 GameEvent/ParsedLogEvent。
+  // activeRuleLibrary 允许用户补充特殊技能规则，例如“发动集智额外摸牌”。
   const gameEvents = parseGameEvents([{ text: record.text, score: 1 }], "hook", deckProfile)
   let ruleChanged = false
   const parsedEvents = gameEventsToParsedLogEvents(gameEvents, deckProfile, activeRuleLibrary, {
@@ -3297,6 +3468,8 @@ function ingestUnredactedTextRecord(record: HookRecord, at: number): boolean {
   return ingestParsedTextEvent(event, record, at) || changed
 }
 
+// 已解析文本事件的落库入口。只有 strict + autoAcceptable + 带精确花色点数的事件
+// 会自动写入 TrackerState；低置信或不支持事件只展示，不强行扣牌。
 function ingestParsedTextEvent(event: ParsedLogEvent, record: HookRecord, at: number): boolean {
   let changed = false
   const text = record.text ?? ""
@@ -3332,6 +3505,7 @@ function ingestParsedTextEvent(event: ParsedLogEvent, record: HookRecord, at: nu
   return ingestSkillPileExactText(text, at) || ingestVisibleExactText(text, at) || changed
 }
 
+// summary 级协议事件只用于模式/生命周期识别；真正改变牌状态的是 raw-protocol-event。
 function ingestProtocolRecord(record: HookRecord): boolean {
   if (!record.eventType) {
     return false
@@ -3346,6 +3520,12 @@ function ingestProtocolRecord(record: HookRecord): boolean {
   return changed
 }
 
+// 所有 pageHook 消息最终都进入这里。
+// 分流顺序很重要：
+// 1. lifecycle/anchor 是辅助信号，单独处理；
+// 2. protocol-event/raw-protocol-event 优先，因为它们通常比文本更可信；
+// 3. raw-ws-frame 只进诊断，不直接参与记牌；
+// 4. 剩下才按页面文本解析。
 function handleHookRecord(record: HookRecord): void {
   pushRecentHookRecord(record)
   status.lastRecordAt = record.at
@@ -3399,6 +3579,8 @@ function handleHookRecord(record: HookRecord): void {
   }
 }
 
+// content script 不能直接访问页面 JS 对象（隔离世界），所以要把 pageHook.js
+// 作为普通 script 标签注入到页面上下文，再通过 postMessage 建桥。
 function injectPageHook(): void {
   if (document.getElementById(HOOK_SCRIPT_ID)) {
     return
@@ -3445,6 +3627,8 @@ function forwardFrameHookMessage(message: HookMessage): void {
   }
 }
 
+// 页面可能 bfcache 恢复、切前台、扩展重载或网络恢复。
+// 这些时机重新注入 hook，确保长期挂着页面时采集链路能自愈。
 function reconnectPageHook(reason: string): void {
   if (!extensionContextValid) {
     return
@@ -3471,6 +3655,8 @@ function bootstrap(): void {
   }
   hostWindow[CONTENT_BOOT_KEY] = CONTENT_VERSION
 
+  // 主 frame 才挂 UI；iframe 只负责把自己采到的 hook 消息转发到 top。
+  // 这样 all_frames=true 时不会出现多个面板，但 iframe 里的游戏文本/协议仍不会丢。
   window.addEventListener("message", (event: MessageEvent) => {
     if (event.source !== window || !isHookMessage(event.data)) {
       if (IS_TOP_FRAME && isHookMessage(event.data) && event.data.source === "sgs-tracker-frame-hook") {
