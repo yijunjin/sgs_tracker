@@ -28,7 +28,7 @@ watch(
       eventLogRef.value.scrollTop = eventLogRef.value.scrollHeight
     }
   },
-  { flush: "post" }
+  { flush: "pre" }
 )
 
 function setMode(mode: SupportedGameModeId): void {
