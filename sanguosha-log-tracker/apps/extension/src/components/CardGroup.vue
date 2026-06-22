@@ -40,6 +40,9 @@ const emit = defineEmits<{
             :class="{
               'is-seen': chip.state !== 'remaining',
               'is-player-visible': chip.state === 'player-visible',
+              'is-field': chip.state === 'equip' || chip.state === 'judge-area' || chip.state === 'skill-pile',
+              'is-judge-area': chip.state === 'judge-area',
+              'is-skill-pile': chip.state === 'skill-pile',
               'is-red': chip.isRed,
               'is-pulsing': chip.pulsing && chip.state !== 'remaining'
             }"

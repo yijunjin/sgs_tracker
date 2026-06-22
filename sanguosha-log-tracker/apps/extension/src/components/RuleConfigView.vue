@@ -19,6 +19,7 @@ type RuleForm = {
   id: string
   description: string
   enabled: boolean
+  priority: number
   eventName: GameEventName
   conditionEnabled: boolean
   conditionPath: string
@@ -87,6 +88,7 @@ function createEmptyForm(): RuleForm {
     id: `custom-${Date.now().toString(36)}`,
     description: "",
     enabled: true,
+    priority: 10,
     eventName: "OnSkillInvoke",
     conditionEnabled: true,
     conditionPath: "event.skill",
@@ -200,6 +202,7 @@ function submitRule(): void {
     id: form.id.trim(),
     description: form.description.trim() || undefined,
     enabled: form.enabled,
+    priority: Math.trunc(Number(form.priority) || 0),
     when: buildCondition(),
     actions: [buildAction()]
   })
@@ -240,6 +243,7 @@ function editRule(rule: RuleDefinition): void {
     id: rule.id,
     description: rule.description ?? "",
     enabled: rule.enabled !== false,
+    priority: rule.priority ?? 0,
     eventName: (isLeafCondition(eventCondition) ? eventCondition.value : undefined) as GameEventName | undefined ?? "OnSkillInvoke",
     conditionEnabled: isLeafCondition(extraCondition),
     conditionPath: isLeafCondition(extraCondition) ? extraCondition.path : "event.skill",
@@ -276,6 +280,10 @@ function describeCondition(condition: RuleCondition | undefined): string {
   if (condition.path === "event.event") return `事件为 ${eventLabel(condition.value)}`
   if (condition.op === "exists") return `${pathLabel(condition.path)} 存在`
   return `${pathLabel(condition.path)} ${opLabel(condition.op)} ${valueToText(condition.value)}`
+}
+
+function describePriority(rule: RuleDefinition): string {
+  return `优先级 ${rule.priority ?? 0}`
 }
 
 function describeAction(action: RuleAction): string {
@@ -322,6 +330,10 @@ function describeAction(action: RuleAction): string {
         <label class="sgs-rule-check">
           <input v-model="form.enabled" type="checkbox" />
           <span>启用规则</span>
+        </label>
+        <label>
+          <span>优先级</span>
+          <input v-model.number="form.priority" type="number" />
         </label>
         <label>
           <span>触发事件</span>
@@ -410,6 +422,8 @@ function describeAction(action: RuleAction): string {
               <option value="hand">手牌</option>
               <option value="equip">装备区</option>
               <option value="judge">判定区</option>
+              <option value="judge-area">判定区（场上）</option>
+              <option value="skill-pile">武将牌上</option>
               <option value="public">公共区</option>
             </select>
           </label>
@@ -452,6 +466,8 @@ function describeAction(action: RuleAction): string {
         <div v-if="openIds[rule.id]" class="sgs-rule-detail">
           <p>{{ rule.description || "无说明" }}</p>
           <dl>
+            <dt>优先级</dt>
+            <dd>{{ describePriority(rule) }}</dd>
             <dt>条件</dt>
             <dd>{{ describeCondition(rule.when) }}</dd>
             <dt>动作</dt>
@@ -475,6 +491,8 @@ function describeAction(action: RuleAction): string {
         <div v-if="openIds[rule.id]" class="sgs-rule-detail">
           <p>{{ rule.description || "无说明" }}</p>
           <dl>
+            <dt>优先级</dt>
+            <dd>{{ describePriority(rule) }}</dd>
             <dt>条件</dt>
             <dd>{{ describeCondition(rule.when) }}</dd>
             <dt>动作</dt>

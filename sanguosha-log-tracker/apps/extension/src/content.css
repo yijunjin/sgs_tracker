@@ -899,6 +899,23 @@
   opacity: 0.9;
 }
 
+.sgs-card-chip.is-field {
+  border-color: rgba(74, 122, 139, 0.78);
+  background: linear-gradient(180deg, #c7d2d2, #778d93);
+  filter: saturate(0.9) brightness(0.96);
+  opacity: 0.92;
+}
+
+.sgs-card-chip.is-judge-area {
+  border-color: rgba(104, 91, 146, 0.78);
+  background: linear-gradient(180deg, #ccc6d9, #81799e);
+}
+
+.sgs-card-chip.is-skill-pile {
+  border-color: rgba(57, 125, 94, 0.78);
+  background: linear-gradient(180deg, #c4d5c8, #748f7f);
+}
+
 .sgs-card-chip.is-seen.is-red {
   color: #8f241f;
 }

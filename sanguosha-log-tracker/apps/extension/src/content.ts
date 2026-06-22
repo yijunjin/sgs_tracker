@@ -79,7 +79,7 @@ type ExactSeenCard = {
   name: string
   suit?: string
   rank?: string
-  zone: "player-visible" | "public" | "equip"
+  zone: "player-visible" | "public" | "equip" | "judge-area" | "skill-pile"
   owner?: string
   sourceText: string
   at: number
@@ -88,6 +88,8 @@ type ExactSeenCard = {
   // 不会出现 2v2 双牌堆同名同花同点一起闪/像被扣减的错觉。
   pulseAt?: number
 }
+
+type ExactCardZone = ExactSeenCard["zone"]
 
 type DeckCardRow = {
   name: string
@@ -136,6 +138,34 @@ type SeatInfo = {
   nickName?: string
   figure?: number
   isSelf?: boolean
+}
+
+type SeatPlayerBinding = {
+  key: string
+  label: string
+  at: number
+  source: string
+}
+
+type RecentHandProtocolMove = {
+  at: number
+  fromZone?: number
+  toZone?: number
+  moveType?: number
+  spellId?: number
+  cardCount?: number
+  fromId?: number
+  toId?: number
+  srcSeatId?: number
+  boundText?: boolean
+}
+
+type PendingDimengHand = {
+  ownerKey: string
+  ownerLabel: string
+  cards: Record<CardName, number>
+  exactCards: ExactSeenCard[]
+  at: number
 }
 
 type DiagnosticHookRecord = Pick<
@@ -245,6 +275,9 @@ const playerAnchorsByKey = new Map<string, PlayerAnchor>()
 // SelfResult.SeatID 标识“您”）、MsgGameShowFigure（局中较早的 SeatID+Figure）。
 // Figure 即阵营编号：同 Figure = 同队。
 const seatRegistry = new Map<number, SeatInfo>()
+const seatPlayerBindings = new Map<number, SeatPlayerBinding>()
+const recentHandProtocolMoves: RecentHandProtocolMove[] = []
+const pendingDimengHands = new Map<number, PendingDimengHand>()
 let selfSeatId: number | undefined
 let selfFigure: number | undefined
 // 已确认“我方阵营”（含自己+队友）的玩家 key。队友判定的稳健来源：2v2 日志里凡“带花色的摸牌”，
@@ -264,6 +297,9 @@ let lastProtocolDeckSignature = ""
 // guanxingBottom 垫在牌堆最底，本轮一般摸不到（除非洗牌前摸空），仅作信息展示。
 const GUANXING_ZONE = 8
 const GUANXING_TOP_POSITION = 65280
+const HAND_ZONE = 5
+const TEMP_HAND_ZONE = 10
+const DIMENG_SPELL_ID = 121
 let guanxingTop: GuanxingCard[] = []
 let guanxingBottom: GuanxingCard[] = []
 let pendingGuanxingTopDetails: GuanxingCardDetail[] = []
@@ -384,6 +420,8 @@ const exactCardAliases: Record<string, string> = {
   无中: "无中生有",
   连弩: "诸葛连弩"
 }
+
+const delayedTrickNames = new Set<CardName>(["乐不思蜀", "兵粮寸断", "闪电"])
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -787,6 +825,8 @@ function resetProtocolCardState(): void {
   protocolCardEntriesById.clear()
   protocolCardZonesById.clear()
   recentProtocolMoveTimes.clear()
+  recentHandProtocolMoves.length = 0
+  pendingDimengHands.clear()
   lastProtocolDeckSignature = ""
 }
 
@@ -1282,19 +1322,14 @@ function applyDeckPileState(next: DeckPileState): void {
   status.reshuffleCount = next.reshuffleCount
 }
 
+function isActiveSeenZone(zone: ExactCardZone): boolean {
+  return zone !== "public"
+}
+
 function clearSeenCardStateForRecycle(): void {
-  // 洗牌把弃牌堆洗回摸牌堆，花色点数信息作废。只保留“敌方可见牌”——即我通过
-  // 过河拆桥/攻心等看到的敌方手牌（zone=player-visible 且 owner 为敌方）。这类信息
-  // 可靠且有价值（敌人没打出就还在）。自己/队友的牌局内本就可见，无需保留；尤其
-  // 1v1 自己摸+自己装备的牌，装备离手在日志/协议里都无信号（自装备无文字、协议无
-  // 花色映射），保留只会变成“幽灵装备”——曾出现洗牌后已被替换的旧武器仍显示可见。
-  const preserved = seenExactCards.filter((card) => {
-    if (card.zone !== "player-visible") {
-      return false
-    }
-    const ownerKey = playerKeyOf(card.owner)
-    return Boolean(ownerKey) && !allyPlayerKeys.has(ownerKey as string)
-  })
+  // 洗牌只把弃牌堆洗回摸牌堆。仍在场上的公开占用牌（装备区、判定区、武将牌上的“创/雾”等）
+  // 以及仍在手里的已知牌都不能回到未见牌池，否则洗牌后会把场上牌误算回牌堆。
+  const preserved = seenExactCards.filter((card) => isActiveSeenZone(card.zone))
   trackerState = createInitialTrackerState(deckProfile)
   seenExactCards.length = 0
   protocolCardZonesById.clear()
@@ -1302,11 +1337,13 @@ function clearSeenCardStateForRecycle(): void {
   exactSourceKeys.clear()
   // 洗牌后牌堆顺序作废，观星控底信息失效。
   resetGuanxingState()
-  // 重新放回保留的敌方可见牌，并重建其来源去重键 + 敌方已知手牌计数。
+  // 重新放回保留的场上/手牌占用牌；只有 player-visible 是“已知手牌”，需要重建玩家已知牌计数。
   for (const card of preserved) {
     seenExactCards.push(card)
     exactSourceKeys.add(`${exactCardKey(card)}|${card.zone}|${card.sourceText}`)
-    addKnownCardForExactOwner(card.owner, card.name, 1)
+    if (card.zone === "player-visible") {
+      addKnownCardForExactOwner(card.owner, card.name, 1)
+    }
   }
 }
 
@@ -1409,6 +1446,159 @@ function shouldSkipDuplicateProtocolMove(msg: Record<string, unknown>, at: numbe
     }
   }
   return previousAt > 0 && at - previousAt >= 0 && at - previousAt < 800
+}
+
+function rememberHandProtocolMove(move: RecentHandProtocolMove): void {
+  if (
+    move.fromZone !== HAND_ZONE &&
+    move.toZone !== HAND_ZONE &&
+    move.fromZone !== TEMP_HAND_ZONE &&
+    move.toZone !== TEMP_HAND_ZONE
+  ) {
+    return
+  }
+  recentHandProtocolMoves.push(move)
+  const cutoff = move.at - 8000
+  while (recentHandProtocolMoves.length > 80 || (recentHandProtocolMoves[0]?.at ?? move.at) < cutoff) {
+    recentHandProtocolMoves.shift()
+  }
+}
+
+function parsedEventCardCount(event: Pick<ParsedLogEvent, "cardName" | "cardNames">): number {
+  return event.cardNames?.length ?? (event.cardName ? 1 : 0)
+}
+
+function findRecentHandMove(
+  at: number,
+  predicate: (move: RecentHandProtocolMove) => boolean,
+  expectedCardCount?: number
+): RecentHandProtocolMove | undefined {
+  return recentHandProtocolMoves
+    .filter((move) => {
+      if (move.boundText || Math.abs(at - move.at) > 2500 || !predicate(move)) {
+        return false
+      }
+      return expectedCardCount === undefined || move.cardCount === undefined || move.cardCount === expectedCardCount
+    })
+    .sort((left, right) => Math.abs(at - left.at) - Math.abs(at - right.at))[0]
+}
+
+function bindSeatsFromParsedTextEvent(event: ParsedLogEvent, at: number): boolean {
+  if (event.action !== "gainKnown") {
+    return false
+  }
+  const cardCount = parsedEventCardCount(event)
+  let changed = false
+
+  if (/从摸牌堆获得/u.test(event.rawText)) {
+    const move = findRecentHandMove(
+      at,
+      (item) => item.fromZone === 1 && item.toZone === HAND_ZONE && item.toId !== undefined,
+      cardCount
+    )
+    if (move) {
+      changed = bindSeatToPlayer(move.toId ?? move.srcSeatId, event.playerName, at, "text-deck-gain") || changed
+      move.boundText = true
+    }
+  }
+
+  if (event.sourcePlayerName && /手牌区.*获得/u.test(event.rawText)) {
+    const directMove = findRecentHandMove(
+      at,
+      (item) => item.fromZone === HAND_ZONE && item.toZone === HAND_ZONE && item.fromId !== undefined && item.toId !== undefined,
+      cardCount
+    )
+    if (directMove) {
+      changed = bindSeatToPlayer(directMove.fromId, event.sourcePlayerName, at, "text-hand-transfer-source") || changed
+      changed = bindSeatToPlayer(directMove.toId ?? directMove.srcSeatId, event.playerName, at, "text-hand-transfer-target") || changed
+      directMove.boundText = true
+    } else {
+      const sourceMove = findRecentHandMove(
+        at,
+        (item) => item.fromZone === HAND_ZONE && item.fromId !== undefined && item.toZone !== 2,
+        cardCount
+      )
+      const targetMove = findRecentHandMove(
+        at,
+        (item) =>
+          item.toZone === HAND_ZONE &&
+          item.toId !== undefined &&
+          (!sourceMove?.spellId || !item.spellId || item.spellId === sourceMove.spellId),
+        cardCount
+      )
+      if (sourceMove || targetMove) {
+        changed = bindSeatToPlayer(sourceMove?.fromId, event.sourcePlayerName, at, "text-hand-transfer-source") || changed
+        changed = bindSeatToPlayer(targetMove?.toId ?? targetMove?.srcSeatId, event.playerName, at, "text-hand-transfer-target") || changed
+        if (sourceMove) {
+          sourceMove.boundText = true
+        }
+        if (targetMove) {
+          targetMove.boundText = true
+        }
+      }
+    }
+  }
+
+  return changed
+}
+
+function knownCardTotal(cards: Record<CardName, number>): number {
+  return Object.values(cards).reduce((sum, count) => sum + Math.max(0, count), 0)
+}
+
+function takeDimengKnownHand(fromSeatId: number | undefined, at: number): boolean {
+  const binding = seatBinding(fromSeatId)
+  if (!binding || fromSeatId === undefined || pendingDimengHands.has(fromSeatId)) {
+    return false
+  }
+  const cards = takeKnownCardsByOwnerKey(binding.key)
+  const exactCards = takeVisibleExactCardsByOwnerKey(binding.key)
+  pendingDimengHands.set(fromSeatId, {
+    ownerKey: binding.key,
+    ownerLabel: binding.label,
+    cards,
+    exactCards,
+    at
+  })
+  return knownCardTotal(cards) > 0 || exactCards.length > 0
+}
+
+function placeDimengKnownHand(fromSeatId: number | undefined, toSeatId: number | undefined, at: number): boolean {
+  if (fromSeatId === undefined) {
+    return false
+  }
+  const pending = pendingDimengHands.get(fromSeatId)
+  const target = seatBinding(toSeatId)
+  if (!pending || !target) {
+    return false
+  }
+  pendingDimengHands.delete(fromSeatId)
+  addKnownCardsToOwnerKey(target.key, pending.cards)
+  restoreVisibleExactCardsForOwner(pending.exactCards, target.label, at, "协议缔盟交换手牌")
+
+  const total = knownCardTotal(pending.cards) + pending.exactCards.length
+  if (total > 0) {
+    pushDisplayEvent({
+      at,
+      type: "protocol",
+      text: `缔盟：${pending.ownerLabel} 的 ${total} 张已知手牌转至 ${target.label}`
+    })
+    return true
+  }
+  return false
+}
+
+function handleDimengKnownHandMove(move: RecentHandProtocolMove): boolean {
+  if (move.spellId !== DIMENG_SPELL_ID || move.moveType !== 11) {
+    return false
+  }
+  if (move.fromZone === HAND_ZONE && move.toZone === TEMP_HAND_ZONE) {
+    return takeDimengKnownHand(move.fromId, move.at)
+  }
+  if (move.fromZone === TEMP_HAND_ZONE && move.toZone === HAND_ZONE) {
+    return placeDimengKnownHand(move.fromId, move.toId, move.at)
+  }
+  return false
 }
 
 function isVisibleProtocolMove(
@@ -1517,6 +1707,19 @@ function ingestRawProtocolRecord(record: HookRecord): boolean {
   const srcSeatId = numberValue(msg.SrcSeatID)
   const fromId = numberValue(msg.FromID)
   const toId = numberValue(msg.ToID)
+  const spellId = numberValue(msg.SpellID)
+  const handMove: RecentHandProtocolMove = {
+    at: record.at,
+    ...(fromZone !== undefined ? { fromZone } : {}),
+    ...(toZone !== undefined ? { toZone } : {}),
+    ...(moveType !== undefined ? { moveType } : {}),
+    ...(spellId !== undefined ? { spellId } : {}),
+    ...(cardCount !== undefined ? { cardCount } : {}),
+    ...(fromId !== undefined ? { fromId } : {}),
+    ...(toId !== undefined ? { toId } : {}),
+    ...(srcSeatId !== undefined ? { srcSeatId } : {})
+  }
+  rememberHandProtocolMove(handMove)
   if (cardIds.length || fromZone !== undefined || toZone !== undefined) {
     changed = ensureRoundActiveFromRawProtocol(record, "协议检测到新旁观移动") || changed
   }
@@ -1533,6 +1736,7 @@ function ingestRawProtocolRecord(record: HookRecord): boolean {
   if (fromZone === 1 && toZone !== 1 && toZone !== GUANXING_ZONE && cardIds.length) {
     consumeGuanxingTopOnDraw(cardIds.length)
   }
+  changed = handleDimengKnownHandMove(handMove) || changed
 
   if (!cardIds.length) {
     return changed
@@ -1564,6 +1768,8 @@ function playerKeyOf(playerName?: string): string | undefined {
 
 function resetSeatRegistry(): void {
   seatRegistry.clear()
+  seatPlayerBindings.clear()
+  pendingDimengHands.clear()
   selfSeatId = undefined
   selfFigure = undefined
   allyPlayerKeys.clear()
@@ -1620,6 +1826,9 @@ function registerSeatsFromPlayers(players: SeatInfo[], selfSeat: number | undefi
       ...(p.nickName ? { nickName: p.nickName } : {}),
       ...(p.figure !== undefined ? { figure: p.figure } : {})
     })
+    if (p.generalName) {
+      bindSeatToPlayer(p.seatId, p.generalName, Date.now(), "protocol-roster")
+    }
   }
   if (selfSeat !== undefined) {
     selfSeatId = selfSeat
@@ -1650,6 +1859,59 @@ function rememberPlayerLabel(playerName?: string): string | undefined {
   const label = playerName?.replace(/（您）/gu, "").trim() || (key === "__self__" ? "您" : key)
   playerLabelsByKey.set(key, label)
   return key
+}
+
+function playerLabelForKey(playerKey: string): string {
+  return playerLabelsByKey.get(playerKey) ?? (playerKey === "__self__" ? "您" : playerKey)
+}
+
+function bindSeatToPlayer(seatId: number | undefined, playerName: string | undefined, at: number, source: string): boolean {
+  if (seatId === undefined || seatId < 0 || seatId === 255) {
+    return false
+  }
+  const key = rememberPlayerLabel(playerName)
+  if (!key) {
+    return false
+  }
+  const label = playerLabelForKey(key)
+  const previous = seatPlayerBindings.get(seatId)
+  if (previous?.key === key) {
+    seatPlayerBindings.set(seatId, { ...previous, label, at, source })
+    return false
+  }
+  seatPlayerBindings.set(seatId, { key, label, at, source })
+
+  const existing = seatRegistry.get(seatId) ?? { seatId }
+  seatRegistry.set(seatId, {
+    ...existing,
+    generalName: label,
+    ...(key === "__self__" ? { isSelf: true } : {})
+  })
+  if (key === "__self__") {
+    selfSeatId = seatId
+    const self = seatRegistry.get(seatId)
+    if (self?.figure !== undefined) {
+      selfFigure = self.figure
+    }
+  }
+  return true
+}
+
+function seatBinding(seatId: number | undefined): SeatPlayerBinding | undefined {
+  if (seatId === undefined || seatId < 0 || seatId === 255) {
+    return undefined
+  }
+  const binding = seatPlayerBindings.get(seatId)
+  if (binding) {
+    return binding
+  }
+  const info = seatRegistry.get(seatId)
+  const key = playerKeyOf(info?.isSelf ? "您" : info?.generalName)
+  if (!key) {
+    return undefined
+  }
+  const label = playerLabelsByKey.get(key) ?? info?.generalName ?? key
+  return { key, label, at: 0, source: "seat-registry" }
 }
 
 function normalizeAnchorText(text: string): string {
@@ -1716,7 +1978,7 @@ function canAcceptExactCardState(card: Pick<ExactSeenCard, "name" | "suit" | "ra
     return false
   }
 
-  if ((zone === "public" || zone === "equip") && seenExactCards.some((item) => item.zone === "player-visible" && exactCardKey(item) === key)) {
+  if (zone !== "player-visible" && seenExactCards.some((item) => isActiveSeenZone(item.zone) && exactCardKey(item) === key)) {
     return true
   }
   if (zone === "player-visible" && seenExactCards.some((item) => exactCardKey(item) === key)) {
@@ -1726,6 +1988,25 @@ function canAcceptExactCardState(card: Pick<ExactSeenCard, "name" | "suit" | "ra
   const maxCopies = exactDeckCount(card)
   const existingCopies = seenExactCards.filter((item) => exactCardKey(item) === key).length
   return maxCopies === 0 || existingCopies < maxCopies
+}
+
+function isDelayedTrickCard(cardName: string | undefined): boolean {
+  return Boolean(cardName && delayedTrickNames.has(cardName as CardName))
+}
+
+function eventHasDelayedTrick(event: Pick<ParsedLogEvent, "cardName" | "cardNames">): boolean {
+  return Boolean(event.cardNames?.some(isDelayedTrickCard) || isDelayedTrickCard(event.cardName))
+}
+
+function isSkillPileText(text: string): boolean {
+  if (/弃置|使用|打出|装备|获得/.test(text)) {
+    return false
+  }
+  return /(?:不屈|创|大雾|狂风|雾|武将牌上|武将牌旁|置于.+?牌上|称为|作为)/u.test(text)
+}
+
+function fieldOwnerFromText(text: string): string | undefined {
+  return text.match(/^(.+?)(?:发动|的|将|亮出|展示|置于|翻开)/u)?.[1]?.trim()
 }
 
 // 看牌/亮牌类文案：这些事件让某玩家的（原本不可见的）手牌对我可见，应归入“玩家已见”并挂浮窗。
@@ -1745,12 +2026,31 @@ function exactEventZone(event: ParsedLogEvent): ExactSeenCard["zone"] {
   if (event.action === "gainKnown" || isHandRevealText(event.rawText) || /手牌区获得|获得.+手牌|从.+的(手牌区|装备区|判定区|手牌|装备)获得/.test(event.rawText)) {
     return "player-visible"
   }
+  if (event.action === "use" && eventHasDelayedTrick(event)) {
+    return "judge-area"
+  }
+  if (isSkillPileText(event.rawText)) {
+    return "skill-pile"
+  }
   // 装备牌进装备区：牌面公开、且“仍在场上”，洗牌时不应被清除（装备不参与洗牌）。
   // 单列 equip 区与 public（打出/弃置，进弃牌堆）区分，供洗牌重置时保留。
   if (event.action === "equip") {
     return "equip"
   }
   return "public"
+}
+
+function exactEventOwner(event: ParsedLogEvent, zone: ExactCardZone): string | undefined {
+  if (zone === "judge-area") {
+    return event.targetName ?? event.playerName
+  }
+  if (zone === "equip") {
+    return event.targetName ?? event.playerName
+  }
+  if (zone === "skill-pile") {
+    return fieldOwnerFromText(event.rawText) ?? event.playerName
+  }
+  return event.playerName
 }
 
 function exactTokensForEvent(event: ParsedLogEvent, at: number): ExactSeenCard[] {
@@ -1761,8 +2061,7 @@ function hasExactTokenForEvent(event: ParsedLogEvent, at: number): boolean {
   return exactTokensForEvent(event, at).length > 0
 }
 
-function addKnownCardForExactOwner(owner: string | undefined, cardName: CardName, delta: number): void {
-  const ownerKey = playerKeyOf(owner)
+function addKnownCardForOwnerKey(ownerKey: string | undefined, cardName: CardName, delta: number): void {
   if (!ownerKey) {
     return
   }
@@ -1778,28 +2077,83 @@ function addKnownCardForExactOwner(owner: string | undefined, cardName: CardName
   trackerState.knownCardsByPlayer[ownerKey] = counts
 }
 
+function addKnownCardForExactOwner(owner: string | undefined, cardName: CardName, delta: number): void {
+  addKnownCardForOwnerKey(playerKeyOf(owner), cardName, delta)
+}
+
+function cloneKnownCardCounts(counts: Record<CardName, number> | undefined): Record<CardName, number> {
+  return Object.fromEntries(Object.entries(counts ?? {}).filter(([, count]) => count > 0)) as Record<CardName, number>
+}
+
+function takeKnownCardsByOwnerKey(ownerKey: string): Record<CardName, number> {
+  const cards = cloneKnownCardCounts(trackerState.knownCardsByPlayer[ownerKey])
+  delete trackerState.knownCardsByPlayer[ownerKey]
+  return cards
+}
+
+function addKnownCardsToOwnerKey(ownerKey: string, cards: Record<CardName, number>): void {
+  for (const [cardName, count] of Object.entries(cards) as Array<[CardName, number]>) {
+    if (count > 0) {
+      addKnownCardForOwnerKey(ownerKey, cardName, count)
+    }
+  }
+}
+
+function takeVisibleExactCardsByOwnerKey(ownerKey: string): ExactSeenCard[] {
+  const cards: ExactSeenCard[] = []
+  for (let index = seenExactCards.length - 1; index >= 0; index -= 1) {
+    const card = seenExactCards[index]
+    if (card?.zone !== "player-visible" || playerKeyOf(card.owner) !== ownerKey) {
+      continue
+    }
+    seenExactCards.splice(index, 1)
+    cards.unshift({ ...card })
+  }
+  return cards
+}
+
+function restoreVisibleExactCardsForOwner(cards: ExactSeenCard[], ownerLabel: string, at: number, sourceText: string): void {
+  for (const card of cards) {
+    seenExactCards.push({
+      ...card,
+      owner: ownerLabel,
+      zone: "player-visible",
+      at,
+      sourceText,
+      pulseAt: at
+    })
+  }
+  if (seenExactCards.length > 360) {
+    seenExactCards.splice(0, seenExactCards.length - 360)
+  }
+}
+
 function upsertExactCardState(card: ExactSeenCard, zone: ExactSeenCard["zone"], event: ParsedLogEvent): boolean {
   const key = exactCardKey(card)
   const sourceKey = `${key}|${zone}|${event.rawText}`
-  rememberPlayerLabel(event.playerName)
+  const owner = exactEventOwner(event, zone)
+  rememberPlayerLabel(owner)
   if (!canAcceptExactCardState(card, zone, event.rawText)) {
     return false
   }
   exactSourceKeys.add(sourceKey)
 
-  if (zone === "public" || zone === "equip") {
-    const visible = seenExactCards.find((item) => item.zone === "player-visible" && exactCardKey(item) === key)
-    if (visible) {
-      // 离开暗手牌进公开区/装备区（打出/弃置/装备/明置）：始终递减原持有者，
-      // 自己装备自己的牌 owner 不变也要减，否则已知手牌残留。
-      addKnownCardForExactOwner(visible.owner, visible.name, -1)
-      visible.zone = zone
-      visible.at = card.at
-      visible.sourceText = event.rawText
-      if (event.playerName) {
-        visible.owner = event.playerName
+  if (zone !== "player-visible") {
+    const active = seenExactCards.find((item) => isActiveSeenZone(item.zone) && exactCardKey(item) === key)
+    if (active) {
+      // 离开暗手牌或场上占用区进入公开/装备/判定/技能牌堆时，旧占用要迁移而非新增一张。
+      if (active.zone === "player-visible") {
+        addKnownCardForExactOwner(active.owner, active.name, -1)
       }
-      visible.pulseAt = card.at
+      active.zone = zone
+      active.at = card.at
+      active.sourceText = event.rawText
+      if (owner) {
+        active.owner = owner
+      } else {
+        delete active.owner
+      }
+      active.pulseAt = card.at
       return true
     }
   }
@@ -1813,8 +2167,8 @@ function upsertExactCardState(card: ExactSeenCard, zone: ExactSeenCard["zone"], 
         addKnownCardForExactOwner(previousOwner, existing.name, -1)
       }
       existing.zone = "player-visible"
-      if (event.playerName) {
-        existing.owner = event.playerName
+      if (owner) {
+        existing.owner = owner
       } else {
         delete existing.owner
       }
@@ -1836,7 +2190,7 @@ function upsertExactCardState(card: ExactSeenCard, zone: ExactSeenCard["zone"], 
     zone,
     sourceText: event.rawText,
     pulseAt: card.at,
-    ...(event.playerName ? { owner: event.playerName } : {})
+    ...(owner ? { owner } : {})
   })
   if (seenExactCards.length > 360) {
     seenExactCards.splice(0, seenExactCards.length - 360)
@@ -1878,6 +2232,89 @@ function applyAcceptedExactEvent(event: ParsedLogEvent, at: number): ParsedLogEv
     applied = applyExactTokenEvent(event, token, index)
   })
   return applied
+}
+
+function activeJudgeResolution(text: string): { owner?: string; cardName: CardName } | undefined {
+  const match = text.match(/^(.+?)的(乐不思蜀|兵粮寸断|闪电)(?:判定结果是|生效|失效|判定)/u)
+  if (!match?.[2]) {
+    return undefined
+  }
+  return {
+    ...(match[1]?.trim() ? { owner: match[1].trim() } : {}),
+    cardName: match[2] as CardName
+  }
+}
+
+function moveActiveJudgeCardToPublic(text: string, at: number): boolean {
+  const resolution = activeJudgeResolution(text)
+  if (!resolution) {
+    return false
+  }
+  const ownerKey = playerKeyOf(resolution.owner)
+  const card = seenExactCards.find((item) => {
+    if (item.zone !== "judge-area" || item.name !== resolution.cardName) {
+      return false
+    }
+    return !ownerKey || playerKeyOf(item.owner) === ownerKey
+  })
+  if (!card) {
+    return false
+  }
+  card.zone = "public"
+  card.at = at
+  card.sourceText = text
+  card.pulseAt = at
+  return true
+}
+
+function skillPileEventId(ownerKey: string, token: ExactSeenCard, index: number): string {
+  return `skill-pile:${ownerKey}:${index}:${token.name}:${token.suit ?? ""}:${token.rank ?? ""}`
+}
+
+function ingestSkillPileExactText(text: string, at: number): boolean {
+  if (!isSkillPileText(text)) {
+    return false
+  }
+  const tokens = extractExactSeenCards(text, at)
+  if (!tokens.length) {
+    return false
+  }
+  const owner = fieldOwnerFromText(text)
+  const ownerKey = playerKeyOf(owner)
+  if (!owner || !ownerKey) {
+    return false
+  }
+
+  let changed = false
+  tokens.forEach((token, index) => {
+    const syntheticEvent: ParsedLogEvent = {
+      id: skillPileEventId(ownerKey, token, index),
+      rawText: text,
+      normalizedText: text,
+      normalizedRawText: text,
+      playerName: owner,
+      action: "judge",
+      cardName: token.name,
+      confidence: 1,
+      source: "hook",
+      status: "accepted",
+      quality: "strict",
+      autoAcceptable: true,
+      suit: token.suit,
+      rank: token.rank,
+      fingerprint: `skill-pile|${text}|${token.name}${token.suit}${token.rank}`,
+      createdAt: new Date(at).toISOString()
+    }
+    changed = upsertExactCardState(token, "skill-pile", syntheticEvent) || changed
+  })
+  if (changed) {
+    pushDisplayEvent({
+      at,
+      type: "text",
+      text
+    })
+  }
+  return changed
 }
 
 function visibleHandOwner(text: string): string | undefined {
@@ -1988,8 +2425,27 @@ function fallbackVariant(card: DeckCardRow, index: number): DeckCardEntry {
   }
 }
 
-function chipView(card: DeckCardEntry, state: "public" | "player-visible" | "equip" | "remaining", index: number, pulsing: boolean): CardChipView {
-  const zoneName = state === "public" ? "公开区" : state === "player-visible" ? "玩家已见" : state === "equip" ? "装备区" : "未见"
+function exactZoneLabel(state: ExactCardZone | "remaining"): string {
+  if (state === "public") {
+    return "弃牌/公开区"
+  }
+  if (state === "player-visible") {
+    return "玩家已见"
+  }
+  if (state === "equip") {
+    return "装备区"
+  }
+  if (state === "judge-area") {
+    return "判定区"
+  }
+  if (state === "skill-pile") {
+    return "武将牌上"
+  }
+  return "未见"
+}
+
+function chipView(card: DeckCardEntry, state: ExactCardZone | "remaining", index: number, pulsing: boolean): CardChipView {
+  const zoneName = exactZoneLabel(state)
   return {
     key: `${card.name}:${card.suit ?? ""}:${card.rank ?? ""}:${index}:${state}`,
     label: card.rank || cardChipLabel(card),
@@ -2006,7 +2462,7 @@ function chipViews(card: DeckCardRow): { chips: CardChipView[]; overflowCount: n
   const maxVisible = 48
   const exactSeen = seenExactCards.filter((item) => item.name === card.name)
   const variants = card.variants.length ? card.variants : Array.from({ length: card.count }, (_, index) => fallbackVariant(card, index))
-  const seenVariantStates = new Map<number, "public" | "player-visible" | "equip">()
+  const seenVariantStates = new Map<number, ExactCardZone>()
   const seenVariantPulse = new Set<number>()
 
   for (const exact of exactSeen) {
@@ -2824,6 +3280,7 @@ function ingestUnredactedTextRecord(record: HookRecord, at: number): boolean {
     return changed
   }
 
+  changed = moveActiveJudgeCardToPublic(record.text, at) || changed
   changed = ingestGuanxingPlacementText(record.text, at) || changed
   const gameEvents = parseGameEvents([{ text: record.text, score: 1 }], "hook", deckProfile)
   let ruleChanged = false
@@ -2835,7 +3292,7 @@ function ingestUnredactedTextRecord(record: HookRecord, at: number): boolean {
   changed = ruleChanged || changed
   const event = parsedEvents[0]
   if (!event) {
-    return ingestVisibleExactText(record.text, at) || changed
+    return ingestSkillPileExactText(record.text, at) || ingestVisibleExactText(record.text, at) || changed
   }
   return ingestParsedTextEvent(event, record, at) || changed
 }
@@ -2845,6 +3302,8 @@ function ingestParsedTextEvent(event: ParsedLogEvent, record: HookRecord, at: nu
   const text = record.text ?? ""
   rememberPlayerLabel(event.playerName)
   rememberPlayerLabel(event.targetName)
+  rememberPlayerLabel(event.sourcePlayerName)
+  changed = bindSeatsFromParsedTextEvent(event, at) || changed
 
   const canAcceptExact =
     event.quality === "strict" &&
@@ -2870,7 +3329,7 @@ function ingestParsedTextEvent(event: ParsedLogEvent, record: HookRecord, at: nu
     })
     changed = true
   }
-  return ingestVisibleExactText(text, at) || changed
+  return ingestSkillPileExactText(text, at) || ingestVisibleExactText(text, at) || changed
 }
 
 function ingestProtocolRecord(record: HookRecord): boolean {

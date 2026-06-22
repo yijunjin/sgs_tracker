@@ -10,7 +10,7 @@ export type ExactSeenCard = {
   name: string
   suit?: string
   rank?: string
-  zone: "player-visible" | "public" | "equip"
+  zone: "player-visible" | "public" | "equip" | "judge-area" | "skill-pile"
   owner?: string
   sourceText: string
   at: number
@@ -58,7 +58,7 @@ export type CardChipView = {
   title: string
   suitIconUrl: string
   suitSymbol: string
-  state: "public" | "player-visible" | "equip" | "remaining"
+  state: "public" | "player-visible" | "equip" | "judge-area" | "skill-pile" | "remaining"
   isRed: boolean
   pulsing: boolean
 }

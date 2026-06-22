@@ -27,7 +27,9 @@ describe("rule engine event projection", () => {
     const [gameEvent] = parseGameEvents("黄月英发动集智", "manual", oneVOneDeckProfile)
     const decrements: Array<Record<string, unknown>> = []
     const handlers: RuleActionHandlers = {
-      decrementDrawPile: (params) => decrements.push(params),
+      decrementDrawPile: (params) => {
+        decrements.push(params)
+      },
       emitTrackerEvent: () => {}
     }
 
@@ -47,5 +49,100 @@ describe("rule engine event projection", () => {
       virtualCardName: "杀",
       note: "转化牌事件，按原始牌计入已见，并记录视为使用的目标牌。"
     })
+  })
+
+  it("runs higher-priority rules first and stops later rules when requested", () => {
+    const [gameEvent] = parseGameEvents("黄月英发动集智", "manual", oneVOneDeckProfile)
+    const calls: string[] = []
+    const engine = new RuleEngine(
+      [
+        {
+          id: "low",
+          priority: 0,
+          when: { path: "event.event", op: "==", value: "OnSkillInvoke" },
+          actions: [{ type: "record", params: { label: "low" } }]
+        },
+        {
+          id: "high",
+          priority: 10,
+          when: { path: "event.event", op: "==", value: "OnSkillInvoke" },
+          actions: [{ type: "record", params: { label: "high" } }]
+        }
+      ],
+      {
+        record: (params) => {
+          calls.push(String(params.label))
+          return params.label === "high" ? { stopPropagation: true } : undefined
+        }
+      }
+    )
+
+    const result = engine.trigger(gameEvent!)
+
+    expect(calls).toEqual(["high"])
+    expect(result).toMatchObject({
+      matchedRuleIds: ["high"],
+      stoppedPropagation: true,
+      stoppedByRuleId: "high",
+      stoppedByActionType: "record"
+    })
+  })
+
+  it("clones object and array params resolved from event payload paths", () => {
+    const [gameEvent] = parseGameEvents("甄姬获得判定牌青釭剑♠6", "manual", oneVOneDeckProfile)
+    const engine = new RuleEngine(
+      [
+        {
+          id: "clone",
+          actions: [{ type: "mutate", params: { cards: "$event.cards", card: "$event.card" } }]
+        }
+      ],
+      {
+        mutate: (params) => {
+          const cards = params.cards as Array<{ name?: string }>
+          const card = params.card as { name?: string }
+          cards[0]!.name = "污染"
+          card.name = "污染"
+        }
+      }
+    )
+
+    engine.trigger(gameEvent!)
+
+    expect(gameEvent?.cards?.[0]?.name).toBe("青釭剑")
+    expect(gameEvent?.card?.name).toBe("青釭剑")
+  })
+
+  it("trims and case-folds defensive string comparisons", () => {
+    const [gameEvent] = parseGameEvents("黄月英发动集智", "manual", oneVOneDeckProfile)
+    const calls: string[] = []
+    const engine = new RuleEngine(
+      [
+        {
+          id: "eq",
+          when: { path: "event.skill", op: "==", value: " 集智 " },
+          actions: [{ type: "record", params: { label: "eq" } }]
+        },
+        {
+          id: "contains",
+          when: { path: "event.player", op: "contains", value: " 月英 " },
+          actions: [{ type: "record", params: { label: "contains" } }]
+        },
+        {
+          id: "in",
+          when: { path: "event.event", op: "in", value: [" onskillinvoke "] },
+          actions: [{ type: "record", params: { label: "in" } }]
+        }
+      ],
+      {
+        record: (params) => {
+          calls.push(String(params.label))
+        }
+      }
+    )
+
+    engine.trigger(gameEvent!)
+
+    expect(calls).toEqual(["eq", "contains", "in"])
   })
 })
