@@ -4,9 +4,10 @@
   "private": true,
   "packageManager": "pnpm@10.8.0",
   "scripts": {
-    "dev": "pnpm --filter @slt/shared build && concurrently \"pnpm dev:api\" \"pnpm dev:web\"",
+    "dev": "pnpm --filter @slt/shared build && concurrently \"pnpm dev:api\" \"pnpm dev:web\" \"pnpm dev:extension\"",
     "dev:web": "pnpm --filter @slt/web dev",
     "dev:api": "pnpm --filter @slt/api dev",
+    "dev:extension": "pnpm --filter @slt/extension dev",
     "build": "pnpm --filter @slt/shared build && pnpm -r --filter=!@slt/shared build",
     "typecheck": "pnpm --filter @slt/shared build && pnpm -r typecheck",
     "test": "pnpm --filter @slt/shared test"
