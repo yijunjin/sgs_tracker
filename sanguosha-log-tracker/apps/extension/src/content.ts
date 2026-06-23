@@ -23,7 +23,6 @@ import {
   type DeckCardEntry,
   type DeckOrderPreviewCard,
   type DeckOrderPreviewCardDetail,
-  type DeckOrderPreviewConfig,
   type DeckOrderPreviewState,
   type DeckPileState,
   type ParsedLogEvent,
@@ -32,7 +31,6 @@ import {
   type SeatRosterEntry,
   type TrackerState
 } from "@slt/shared"
-import { createApp, type App as VueApp } from "vue"
 import TrackerApp from "./App.vue"
 import trackerStyles from "./content.css?raw"
 import {
@@ -43,10 +41,84 @@ import {
   type CardGroupView,
   type EnemyHandView,
   type EnemyKnownCardView,
-  type EventLogRowView,
   type DeckOrderPreviewView,
   type TrackerSnapshot
 } from "./trackerStore"
+import {
+  COLLECTOR_URL,
+  CONTENT_BOOT_KEY,
+  CONTENT_VERSION,
+  CUSTOM_RULES_STORAGE_KEY,
+  DECK_ORDER_PREVIEW_SOURCE,
+  DIMENG_SPELL_ID,
+  HAND_OVERLAY_ROOT_ID,
+  HAND_ZONE,
+  HOOK_SCRIPT_ID,
+  LOG_COLLAPSED_STORAGE_KEY,
+  MAX_PANEL_WIDTH,
+  MIN_PANEL_WIDTH,
+  PANEL_WIDTH_STORAGE_KEY,
+  ROOT_ID,
+  TEMP_HAND_ZONE
+} from "./contentConfig"
+import { buildCollectorDiagnostics, buildCollectorExportPayload } from "./collectorPayload"
+import {
+  cardChipLabel,
+  cardDisplayOrder,
+  cardFullLabel,
+  cardTooltip,
+  delayedTrickNames,
+  exactCardAliases,
+  handCardNameLabel,
+  isRedSuit,
+  normalizeSuitSymbol,
+  suitAssetFileName,
+  suitSymbol
+} from "./cardPresentation"
+import {
+  detectGameModeIdFromRecord,
+  detectGameModeIdFromText,
+  looksLikeGameOverText,
+  looksLikeInGameStart,
+  supportedModeLabel
+} from "./gameModeSignals"
+import { forwardFrameHookMessage, isHookMessage } from "./hookBridge"
+import { createPanelRenderer } from "./panelRenderer"
+import {
+  loadCustomRules as loadStoredCustomRules,
+  persistCustomRules as persistStoredCustomRules,
+  prepareCustomRule
+} from "./customRulesStorage"
+import {
+  type DeckCardRow,
+  type DeckOrderPreviewExportCard,
+  type CollectorDiagnostics,
+  type DiagnosticHookRecord,
+  type DisplayEvent,
+  type ExactCardZone,
+  type ExactSeenCard,
+  type ExportPayload,
+  type HookMessage,
+  type HookRecord,
+  type LayaPosition,
+  type PendingDimengHand,
+  type PlayerAnchor,
+  type RecentHandProtocolMove,
+  type SeatInfo,
+  type SeatPlayerBinding,
+  type SupportedGameModeId,
+  type TrackingPhase
+} from "./contentTypes"
+import { createRuntimeUrlResolver } from "./extensionRuntime"
+import { createPageInstanceId, isTopFrame } from "./frameIdentity"
+import { isObjectRecord, numberArrayValue, numberValue, rawProtocolMessage, stringValue } from "./protocolValues"
+import {
+  drawPileRemainingLabel as formatDrawPileRemainingLabel,
+  eventLogRows as buildEventLogRows,
+  formatClock,
+} from "./snapshotText"
+import { clamp, loadBoolean, loadNumber } from "./storageValues"
+import { buildTrackerSnapshotView } from "./trackerSnapshot"
 
 /**
  * content script 是插件的主控层，运行在三国杀网页的隔离世界里。
@@ -62,197 +134,6 @@ import {
  * 数据来源可信度、以及为什么要保留某些看似重复的状态。
  */
 
-// pageHook.js 发回来的最小事件单元。字段很多是可选的，因为不同来源只能提供部分信息：
-// 文本 hook 主要提供 text/rawText/pos；协议 hook 主要提供 eventType/dataRaw；
-// WebSocket 抓包主要提供 direction/wsUrl/payload。
-type HookRecord = {
-  at: number
-  kind: string
-  text?: string
-  rawText?: string
-  eventType?: string
-  dataSummary?: unknown
-  dataRaw?: unknown
-  direction?: string
-  wsUrl?: string
-  payload?: unknown
-  frameUrl?: string
-  pos?: unknown
-  redacted?: boolean
-  redactionReason?: string
-  sampleReason?: string
-}
-
-// postMessage 的外层包。source 用来区分主 frame 和 iframe 转发，hookVersion 用于排查旧 hook 未刷新。
-type HookMessage = {
-  source: "sgs-tracker-page-hook" | "sgs-tracker-frame-hook"
-  hookVersion: string
-  frameUrl?: string
-  record: HookRecord
-}
-
-// UI 底部日志使用的轻量事件。真正会改变牌堆的事件放在 event 里，纯诊断/提示只展示 text。
-type DisplayEvent = {
-  id: string
-  at: number
-  text: string
-  type: "text" | "protocol" | "game-over" | "redacted"
-  event?: ParsedLogEvent
-}
-
-// “精确已见牌”表示我们已经知道一张实体牌的名称、花色、点数、当前位置。
-// 和 TrackerState 里的按名称计数不同，这里尽量追踪到“某一张实体牌”，用于：
-// - 判断同名牌的不同花色/点数是否已见；
-// - 敌方已知手牌列表；
-// - 牌区动画高亮 pulseAt；
-// - 洗牌/回收时把实体状态移动回牌堆。
-type ExactSeenCard = {
-  id: string
-  cardId?: number
-  name: string
-  suit?: string
-  rank?: string
-  zone: "player-visible" | "public" | "equip" | "judge-area" | "skill-pile"
-  owner?: string
-  sourceText: string
-  at: number
-  // 闪烁时间戳：精确到“这一张实体牌”。每个 seenExactCards 条目独立持有，
-  // renderChips 把每个条目映射到唯一变体下标，故只有真正变动的那张会闪，
-  // 不会出现 2v2 双牌堆同名同花同点一起闪/像被扣减的错觉。
-  pulseAt?: number
-}
-
-type ExactCardZone = ExactSeenCard["zone"]
-
-type DeckCardRow = {
-  name: string
-  count: number
-  type?: DeckCardEntry["type"]
-  description?: string
-  variants: DeckCardEntry[]
-}
-
-type DeckOrderPreviewExportCard = {
-  cardId: number
-  name?: string
-  suit?: string
-  rank?: string
-}
-
-// pageHook.js 会把 Laya 节点坐标换算到浏览器视口坐标。当前敌方手牌已并入面板展示，
-// 坐标主要保留给 collector 诊断和后续如果恢复页面浮层时复用。
-type LayaPosition = {
-  x: number
-  y: number
-  width: number
-  height: number
-  visible?: boolean
-}
-
-type PlayerAnchor = {
-  key: string
-  label: string
-  x: number
-  y: number
-  width: number
-  height: number
-  at: number
-}
-
-// 座位信息：来自协议 Players[]/ShowFigure。figure 为阵营编号（同 figure 即同队）。
-type SeatInfo = {
-  seatId: number
-  generalName?: string
-  nickName?: string
-  figure?: number
-  isSelf?: boolean
-}
-
-type SeatPlayerBinding = {
-  key: string
-  label: string
-  at: number
-  source: string
-}
-
-type RecentHandProtocolMove = {
-  at: number
-  fromZone?: number
-  toZone?: number
-  moveType?: number
-  spellId?: number
-  cardCount?: number
-  fromId?: number
-  toId?: number
-  srcSeatId?: number
-  boundText?: boolean
-}
-
-// 缔盟等“整把手牌临时挪走再给别人”的技能，会导致已知手牌在短时间内换 owner。
-// 这里先暂存来源玩家的已知手牌，等协议里的目标座位出现后再落到目标玩家。
-type PendingDimengHand = {
-  ownerKey: string
-  ownerLabel: string
-  cards: Record<CardName, number>
-  exactCards: ExactSeenCard[]
-  at: number
-}
-
-type DiagnosticHookRecord = Pick<
-  HookRecord,
-  | "at"
-  | "kind"
-  | "text"
-  | "rawText"
-  | "eventType"
-  | "dataSummary"
-  | "dataRaw"
-  | "direction"
-  | "wsUrl"
-  | "payload"
-  | "frameUrl"
-  | "redacted"
-  | "redactionReason"
-  | "sampleReason"
-  | "pos"
->
-
-type SupportedGameModeId = "sgs-happy-2v2" | "sgs-1v1"
-type TrackingPhase = "waiting" | "detecting-mode" | "in-game" | "ended"
-
-// 发给本机 collector 的诊断快照结构。collector 是可选辅助服务：
-// 插件没有 collector 也能正常工作，有 collector 时可以保存原始 hook 记录便于复盘问题。
-type CollectorDiagnostics = {
-  href: string
-  title: string
-  pageInstanceId: string
-  contentVersion: string
-  isTopFrame: boolean
-  visibilityState: DocumentVisibilityState
-  hasFocus: boolean
-  lastRecordAgeMs: number | null
-  collectorLastPostAt: string | null
-  collectorPostAgeMs: number | null
-  collectorSequence: number
-  recentHookRecords: DiagnosticHookRecord[]
-  recentRawHookRecords: DiagnosticHookRecord[]
-  recentRawTextCount: number
-  seenStageTextCount: number
-  recentTextKeyCount: number
-  exactSourceKeyCount: number
-}
-
-const ROOT_ID = "sgs-card-tracker-root"
-const HAND_OVERLAY_ROOT_ID = "sgs-known-hand-overlay-root"
-const HOOK_SCRIPT_ID = "sgs-card-tracker-page-hook"
-const CONTENT_VERSION = "extension-content-v34-reshuffle-keep-enemy"
-const CONTENT_BOOT_KEY = "__SGS_TRACKER_CONTENT_VERSION__"
-const PANEL_WIDTH_STORAGE_KEY = "sgs-tracker-panel-width"
-const LOG_COLLAPSED_STORAGE_KEY = "sgs-tracker-log-collapsed"
-const CUSTOM_RULES_STORAGE_KEY = "sgs-tracker-custom-rules"
-const COLLECTOR_URL = "http://127.0.0.1:18765/snapshot"
-const MIN_PANEL_WIDTH = 340
-const MAX_PANEL_WIDTH = 760
 const IS_TOP_FRAME = isTopFrame()
 const PAGE_INSTANCE_ID = createPageInstanceId()
 
@@ -284,33 +165,45 @@ let drawPileRemainingSource = ""
 let drawPileCalibrated = false
 let midGameBaseline = false
 
-// 这些 queued 标记用于把高频 hook 事件合并成较少的 DOM/网络工作。
-// Laya 文本和 WebSocket 帧可能在一秒内触发很多次，直接同步渲染会拖慢游戏页面。
-let renderQueued = false
+// collectorQueued 只管理网络上报合并；DOM 渲染队列由 panelRenderer 管。
+// Laya 文本和 WebSocket 帧可能在一秒内触发很多次，直接同步渲染/上报会拖慢游戏页面。
 let collectorQueued = false
 let lastCollectorPostAt = 0
 let collectorSequence = 0
 let heartbeatTimer = 0
 let lastRenderStateSignature = ""
-let handOverlayQueued = false
-let lastHandOverlayRenderAt = 0
-let vueApp: VueApp<Element> | undefined
-let customRules: RuleDefinition[] = loadCustomRules()
+let customRules: RuleDefinition[] = loadStoredCustomRules(CUSTOM_RULES_STORAGE_KEY)
 let activeRuleLibrary: RuleLibrary = createRuleLibrary(customRules)
 
 // localStorage 只存 UI 偏好和用户规则。真正的牌局状态不持久化，
 // 避免刷新页面后把上一局的已见牌误带入新页面。
 trackerStore.ui.logCollapsed = loadBoolean(LOG_COLLAPSED_STORAGE_KEY, false)
-trackerStore.ui.panelWidth = loadNumber(PANEL_WIDTH_STORAGE_KEY, 388)
+trackerStore.ui.panelWidth = loadNumber(PANEL_WIDTH_STORAGE_KEY, 388, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH)
 trackerStore.state.ruleConfig.systemRules = systemRuleLibrary.rules
 trackerStore.state.ruleConfig.customRules = customRules
 const openGroups: Record<string, boolean> = trackerStore.ui.openGroups
 
 const status = trackerStore.state.status
 
-// Chrome 扩展热更新/重新加载后，旧 content script 里的 chrome.runtime.getURL 可能抛错。
-// 一旦检测到上下文失效，就停止依赖 runtime URL 和心跳，避免控制台刷异常。
-let extensionContextValid = true
+// runtimeUrls 只负责解析扩展资源 URL；一旦扩展上下文失效，停止 collector 心跳，
+// 避免旧 content script 在扩展热更新后持续访问 chrome.runtime 造成控制台噪声。
+const runtimeUrls = createRuntimeUrlResolver(() => {
+  if (heartbeatTimer) {
+    window.clearInterval(heartbeatTimer)
+    heartbeatTimer = 0
+  }
+})
+
+const panelRenderer = createPanelRenderer({
+  rootId: ROOT_ID,
+  handOverlayRootId: HAND_OVERLAY_ROOT_ID,
+  trackerStyles,
+  appComponent: TrackerApp,
+  isTopFrame: IS_TOP_FRAME,
+  syncReactiveState,
+  bindTrackerActions,
+  queueRenderStateSnapshot
+})
 
 // 下列数组/Map 是运行时内存索引：
 // - displayEvents：底部日志；
@@ -349,226 +242,11 @@ const recentProtocolMoveTimes = new Map<string, number>()
 let rawCollectorQueued = false
 let lastProtocolDeckSignature = ""
 
-// 牌堆顺序预览追踪（协议驱动，零猜测）：
-// 当前观星只是一个配置来源：FromZone 1 → previewZone 表示查看牌堆顶 N 张；
-// previewZone → 1 表示摆回牌堆，topPosition=顶部，其余=底部。
-// 真机抓包验证：观星摆到顶部组的 cardId 数组靠后者更接近下一张摸牌，因此 topOrder=reverse。
-type DeckOrderPreviewSource = {
-  id: string
-  label: string
-  heading: string
-  titlePrefix: string
-  topTipLabel: string
-  bottomTipLabel: string
-  config: DeckOrderPreviewConfig
-}
-
-const DECK_ORDER_PREVIEW_SOURCE: DeckOrderPreviewSource = {
-  id: "guanxing",
-  label: "观星",
-  heading: "观星控底",
-  titlePrefix: "观星控底",
-  topTipLabel: "你观星控到牌堆顶、尚未被摸走的牌",
-  bottomTipLabel: "你观星垫到牌堆底的牌",
-  config: {
-    drawPileZone: 1,
-    previewZone: 8,
-    topPosition: 65280,
-    topOrder: "reverse",
-    bottomOrder: "as-is"
-  }
-}
-const HAND_ZONE = 5
-const TEMP_HAND_ZONE = 10
-const DIMENG_SPELL_ID = 121
 let deckOrderPreviewState: DeckOrderPreviewState = createDeckOrderPreviewState()
-
-type ExportPayload = {
-  exportedAt: string
-  source: "sgs-extension-hook"
-  pageInstanceId: string
-  sequence: number
-  reason: string
-  pageUrl: string
-  trackingPhase: TrackingPhase
-  hasInGameSignal: boolean
-  gameModeId?: SupportedGameModeId
-  gameModeLabel: string
-  gameModeSource: string
-  deckProfile: typeof deckProfile
-  deckProfileSource: string
-  drawPileRemaining?: number
-  drawPileRemainingSource: string
-  drawPileCalibrated: boolean
-  midGameBaseline: boolean
-  seatRegistry: SeatInfo[]
-  selfSeatId?: number
-  selfFigure?: number
-  allyPlayerKeys: string[]
-  playerAnchors: PlayerAnchor[]
-  status: typeof status
-  trackerState: TrackerState
-  seenExactCards: ExactSeenCard[]
-  exactCardStates: ExactSeenCard[]
-  guanxing?: {
-    top: number[]
-    bottom: number[]
-    topCards?: DeckOrderPreviewExportCard[]
-    bottomCards?: DeckOrderPreviewExportCard[]
-    peekCount: number
-    at: number
-  }
-  recentEvents: DisplayEvent[]
-  diagnostics: CollectorDiagnostics
-}
-
-function isTopFrame(): boolean {
-  try {
-    return window.self === window.top
-  } catch {
-    return false
-  }
-}
-
-function createPageInstanceId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
-}
-
-// 牌名展示顺序不是按字典序，而是按玩家读牌时的常用优先级：
-// 基本牌 -> 常见锦囊 -> 装备/坐骑。这样 UI 扫描成本最低。
-const cardDisplayOrder = new Map<string, number>(
-  [
-    "杀",
-    "雷杀",
-    "火杀",
-    "闪",
-    "桃",
-    "酒",
-    "无懈可击",
-    "过河拆桥",
-    "顺手牵羊",
-    "无中生有",
-    "乐不思蜀",
-    "南蛮入侵",
-    "万箭齐发",
-    "借刀杀人",
-    "五谷丰登",
-    "桃园结义",
-    "闪电",
-    "铁索连环",
-    "兵粮寸断",
-    "决斗",
-    "火攻",
-    "诸葛连弩",
-    "雌雄双股剑",
-    "青釭剑",
-    "青龙偃月刀",
-    "丈八蛇矛",
-    "贯石斧",
-    "麒麟弓",
-    "古锭刀",
-    "朱雀羽扇",
-    "方天画戟",
-    "寒冰剑",
-    "八卦阵",
-    "仁王盾",
-    "藤甲",
-    "白银狮子",
-    "赤兔",
-    "紫骍",
-    "大宛",
-    "绝影",
-    "的卢",
-    "爪黄飞电",
-    "骅骝"
-  ].map((name, index) => [name, index])
-)
-
-const exactCardAliases: Record<string, string> = {
-  借刀: "借刀杀人",
-  无懈: "无懈可击",
-  过河: "过河拆桥",
-  顺手: "顺手牵羊",
-  五谷: "五谷丰登",
-  桃园: "桃园结义",
-  铁索: "铁索连环",
-  兵粮: "兵粮寸断",
-  南蛮: "南蛮入侵",
-  万箭: "万箭齐发",
-  无中: "无中生有",
-  连弩: "诸葛连弩"
-}
-
-const delayedTrickNames = new Set<CardName>(["乐不思蜀", "兵粮寸断", "闪电"])
 
 // -----------------------------
 // 通用小工具与用户规则持久化
 // -----------------------------
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value))
-}
-
-function loadNumber(key: string, fallback: number): number {
-  const raw = window.localStorage.getItem(key)
-  const value = raw ? Number(raw) : Number.NaN
-  return Number.isFinite(value) ? clamp(value, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH) : fallback
-}
-
-function loadBoolean(key: string, fallback: boolean): boolean {
-  const raw = window.localStorage.getItem(key)
-  return raw === null ? fallback : raw === "true"
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value))
-}
-
-function isValidRule(value: unknown): value is RuleDefinition {
-  if (!isRecord(value) || typeof value.id !== "string" || !value.id.trim() || !Array.isArray(value.actions)) {
-    return false
-  }
-
-  return value.actions.every((action) => isRecord(action) && typeof action.type === "string" && action.type.trim().length > 0)
-}
-
-// 用户规则从 localStorage 读出时必须“宽进严出”：
-// localStorage 可能被手动编辑，或旧版本留下不完整字段，所以先做结构校验再补默认值。
-function normalizeRule(value: RuleDefinition): RuleDefinition {
-  return {
-    ...value,
-    id: value.id.trim(),
-    enabled: value.enabled !== false
-  }
-}
-
-function prepareCustomRule(value: RuleDefinition): RuleDefinition {
-  if (!isValidRule(value)) {
-    throw new Error("规则必须包含 id 和 actions[].type")
-  }
-  const rule = normalizeRule(value)
-  if (systemRuleLibrary.rules.some((item) => item.id === rule.id)) {
-    throw new Error("规则 id 已被系统规则占用")
-  }
-  return rule
-}
-
-function loadCustomRules(): RuleDefinition[] {
-  try {
-    const raw = window.localStorage.getItem(CUSTOM_RULES_STORAGE_KEY)
-    if (!raw) {
-      return []
-    }
-    const parsed = JSON.parse(raw) as unknown
-    return Array.isArray(parsed) ? parsed.filter(isValidRule).map(normalizeRule) : []
-  } catch {
-    return []
-  }
-}
-
-function persistCustomRules(): void {
-  window.localStorage.setItem(CUSTOM_RULES_STORAGE_KEY, JSON.stringify(customRules))
-}
 
 function refreshRuleLibrary(): void {
   activeRuleLibrary = createRuleLibrary(customRules)
@@ -576,133 +254,13 @@ function refreshRuleLibrary(): void {
   trackerStore.state.ruleConfig.customRules = [...customRules]
 }
 
-// 所有扩展资源 URL 都从这里拿，集中处理“扩展上下文失效”的情况。
-// 这比到处 try/catch chrome.runtime.getURL 更容易维护，也避免旧 content script 反复报错。
-function runtimeUrl(path: string): string {
-  if (!extensionContextValid) {
-    return ""
-  }
-  try {
-    return (globalThis as { chrome?: { runtime?: { getURL(path: string): string } } }).chrome?.runtime?.getURL(path) ?? ""
-  } catch {
-    extensionContextValid = false
-    if (heartbeatTimer) {
-      window.clearInterval(heartbeatTimer)
-      heartbeatTimer = 0
-    }
-    return ""
-  }
-}
-
 // -----------------------------
 // 牌面展示与观星文本解析
 // -----------------------------
 
-function cardShortName(name: string): string {
-  const map: Record<string, string> = {
-    杀: "杀",
-    雷杀: "雷",
-    火杀: "火",
-    闪: "闪",
-    桃: "桃",
-    酒: "酒",
-    无懈可击: "无",
-    过河拆桥: "拆",
-    顺手牵羊: "顺",
-    无中生有: "中",
-    乐不思蜀: "乐",
-    兵粮寸断: "粮",
-    南蛮入侵: "蛮",
-    万箭齐发: "箭",
-    桃园结义: "园",
-    铁索连环: "索",
-    借刀杀人: "借",
-    五谷丰登: "谷",
-    闪电: "电"
-  }
-  return map[name] ?? name.slice(0, 2)
-}
-
-function handCardNameLabel(name: string): string {
-  const map: Record<string, string> = {
-    无懈可击: "无懈",
-    过河拆桥: "过拆",
-    顺手牵羊: "顺手",
-    无中生有: "无中",
-    乐不思蜀: "乐不",
-    兵粮寸断: "兵粮",
-    南蛮入侵: "南蛮",
-    万箭齐发: "万箭",
-    桃园结义: "桃园",
-    铁索连环: "铁索",
-    借刀杀人: "借刀",
-    五谷丰登: "五谷",
-    木牛流马: "木牛",
-    闪电: "闪电"
-  }
-  return map[name] ?? (name.length <= 2 ? name : name.slice(0, 2))
-}
-
-function suitSymbol(suit: string | undefined): string {
-  const map: Record<string, string> = {
-    heart: "♥",
-    diamond: "♦",
-    club: "♣",
-    spade: "♠",
-    红桃: "♥",
-    方片: "♦",
-    方块: "♦",
-    梅花: "♣",
-    黑桃: "♠"
-  }
-  return suit ? map[suit] ?? suit : ""
-}
-
-function normalizeSuitSymbol(value: string | undefined): string | undefined {
-  const map: Record<string, string> = {
-    "♥": "红桃",
-    "♦": "方片",
-    "♣": "梅花",
-    "♠": "黑桃"
-  }
-  return value ? map[value] ?? value : undefined
-}
-
 function suitAssetUrl(suit: string | undefined): string {
-  const map: Record<string, string> = {
-    heart: "hongxin.png",
-    diamond: "fangpian.png",
-    club: "meihua.png",
-    spade: "kuihua.png",
-    红桃: "hongxin.png",
-    方片: "fangpian.png",
-    方块: "fangpian.png",
-    梅花: "meihua.png",
-    黑桃: "kuihua.png"
-  }
-  const fileName = suit ? map[suit] : undefined
-  return fileName ? runtimeUrl(`assets/${fileName}`) : ""
-}
-
-function isRedSuit(suit: string | undefined): boolean {
-  return Boolean(suit && /heart|diamond|红桃|方片|方块/.test(suit))
-}
-
-function cardChipLabel(card: DeckCardEntry): string {
-  if (card.rank || card.suit) {
-    return `${card.rank ?? ""}${suitSymbol(card.suit)}`
-  }
-  return cardShortName(card.name)
-}
-
-function cardFullLabel(card: Pick<DeckCardEntry, "name" | "rank" | "suit">): string {
-  const suit = suitSymbol(card.suit)
-  const rank = card.rank ?? ""
-  return `${card.name}${suit || rank ? ` ${suit}${rank}` : ""}`
-}
-
-function cardTooltip(card: Pick<DeckCardEntry, "name" | "rank" | "suit" | "description">, state: "公开区" | "玩家已见" | "未见"): string {
-  return [cardFullLabel(card), state, card.description].filter(Boolean).join("\n")
+  const fileName = suitAssetFileName(suit)
+  return fileName ? runtimeUrls.runtimeUrl(`assets/${fileName}`) : ""
 }
 
 function cardDescription(name: string): string | undefined {
@@ -813,16 +371,6 @@ function deckProfileById(id: SupportedGameModeId): typeof deckProfile | undefine
   return deckProfiles.find((profile) => profile.id === id)
 }
 
-function supportedModeLabel(id: SupportedGameModeId | undefined): string {
-  if (id === "sgs-1v1") {
-    return "1v1"
-  }
-  if (id === "sgs-happy-2v2") {
-    return "欢乐 2v2"
-  }
-  return "未识别"
-}
-
 function isGameModeReady(): boolean {
   return Boolean(gameModeId)
 }
@@ -924,38 +472,6 @@ function setGameMode(id: SupportedGameModeId, source: string): boolean {
   return changed
 }
 
-// 文本模式识别是弱信号：页面标题/模式文字可能短暂出现或重复出现。
-// 如果用户手动锁定或协议已锁定，这里不会覆盖当前模式。
-function detectGameModeIdFromText(text: string): SupportedGameModeId | undefined {
-  const normalized = text.replace(/\s+/g, "").toLowerCase()
-  if (/1v1|新1v1|一对一|一战到底/.test(normalized)) {
-    return "sgs-1v1"
-  }
-  if (/2v2|二对二|欢乐成双|欢乐军争|欢乐2v2|欢乐/.test(normalized)) {
-    return "sgs-happy-2v2"
-  }
-  return undefined
-}
-
-// 协议模式识别是强信号，优先从 Mode/Room/GameType 等字段里找。
-// pageHook.js 只做轻量 summary，content.ts 才决定是否切换具体 deckProfile。
-function detectGameModeIdFromRecord(record: HookRecord): SupportedGameModeId | undefined {
-  if (record.text) {
-    const textMode = detectGameModeIdFromText(record.text)
-    if (textMode) {
-      return textMode
-    }
-  }
-  if (record.dataSummary !== undefined) {
-    try {
-      return detectGameModeIdFromText(JSON.stringify(record.dataSummary))
-    } catch {
-      return undefined
-    }
-  }
-  return undefined
-}
-
 function updateGameModeFromRecord(record: HookRecord): boolean {
   if ((manualModeLocked || protocolModeLocked) && gameModeId) {
     return false
@@ -996,16 +512,8 @@ function cycleSeenTotal(): number {
   return seenExactCards.length
 }
 
-function drawPileRemainingLabel(): string {
-  if (drawPileRemaining === undefined) {
-    return "待协议"
-  }
-  // 中途接入未校准时，数字仅供参考，加 ~ 前缀提示不可信。
-  return drawPileCalibrated ? String(drawPileRemaining) : `~${drawPileRemaining}`
-}
-
-function formatClock(timestamp: number): string {
-  return timestamp ? new Date(timestamp).toLocaleTimeString("zh-CN", { hour12: false }) : "--:--:--"
+function currentDrawPileRemainingLabel(): string {
+  return formatDrawPileRemainingLabel(drawPileRemaining, drawPileCalibrated)
 }
 
 function applyRuleDrawPileDecrement(params: Record<string, unknown>, at: number): boolean {
@@ -1058,24 +566,6 @@ function groupCards(type: DeckCardEntry["type"]): DeckCardRow[] {
     const rightOrder = cardDisplayOrder.get(right.name) ?? 999
     return leftOrder - rightOrder || left.name.localeCompare(right.name, "zh-CN")
   })
-}
-
-function looksLikeInGameStart(record: HookRecord): boolean {
-  if (record.kind === "protocol-event") {
-    return Boolean(record.eventType && /MsgGameTurnNtf|GsCGamephaseNtf|MsgActionStateNtf/.test(record.eventType))
-  }
-  return Boolean(record.text && /剩余牌|牌堆|牌库|第\s*\d+\s*轮|出牌阶段|摸牌阶段|判定阶段/.test(record.text))
-}
-
-function looksLikeGameOverText(text: string | undefined): boolean {
-  if (!text) {
-    return false
-  }
-  const normalized = text.replace(/\s+/g, "")
-  return (
-    /牌局结束|游戏结束|战斗结束|最后结算|点击空白处关闭|熟练度|银两/.test(normalized) ||
-    (normalized.length <= 4 && /^(胜利|失败|平局)$/.test(normalized))
-  )
 }
 
 function finishRound(at: number, text = "牌局结束"): void {
@@ -1158,47 +648,6 @@ function exactCardKey(card: Pick<ExactSeenCard, "name" | "suit" | "rank">): stri
 
 function exactDeckCount(card: Pick<ExactSeenCard, "name" | "suit" | "rank">): number {
   return deckProfile.cards.filter((item) => item.name === card.name && suitSymbol(item.suit) === suitSymbol(card.suit) && item.rank === card.rank).length
-}
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value))
-}
-
-function stringValue(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    const trimmed = value.trim()
-    return trimmed || undefined
-  }
-  return undefined
-}
-
-function numberValue(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value
-  }
-  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) {
-    return Number(value)
-  }
-  return undefined
-}
-
-function numberArrayValue(value: unknown): number[] {
-  if (!Array.isArray(value)) {
-    return []
-  }
-  return value.map(numberValue).filter((item): item is number => item !== undefined)
-}
-
-// pageHook.js 对 raw-protocol-event 的 dataRaw 会尽量深拷贝原始对象。
-// 不同协议事件有的把真正消息放在 msg 字段，有的自身就是消息体，所以这里统一拆出消息对象。
-function rawProtocolMessage(record: HookRecord): Record<string, unknown> | undefined {
-  if (!isObjectRecord(record.dataRaw)) {
-    return undefined
-  }
-  if (isObjectRecord(record.dataRaw.msg)) {
-    return record.dataRaw.msg
-  }
-  return record.dataRaw
 }
 
 function protocolCardEntry(cardId: number): DeckCardEntry | undefined {
@@ -1424,12 +873,12 @@ function recycleProtocolDiscardPile(at: number, cardCount?: number): boolean {
   } else {
     // 常规牌堆快照：只校准牌堆数，不动已见牌（牌入弃牌堆但身份仍已知）。
     drawPileRemainingSource = cardCount !== undefined
-      ? `协议同步牌堆剩余 ${drawPileRemainingLabel()} · ${formatClock(at)}`
-      : `协议同步牌堆剩余 ${drawPileRemainingLabel()} · ${formatClock(at)}`
+      ? `协议同步牌堆剩余 ${currentDrawPileRemainingLabel()} · ${formatClock(at)}`
+      : `协议同步牌堆剩余 ${currentDrawPileRemainingLabel()} · ${formatClock(at)}`
     pushDisplayEvent({
       at,
       type: "protocol",
-      text: `协议同步牌堆剩余 ${drawPileRemainingLabel()} 张`
+      text: `协议同步牌堆剩余 ${currentDrawPileRemainingLabel()} 张`
     })
   }
   return true
@@ -2711,74 +2160,34 @@ function deckOrderPreviewView(): DeckOrderPreviewView {
   }
 }
 
-function eventLogRows(): EventLogRowView[] {
-  return displayEvents.slice(-80).map((item) => ({
-    id: item.id,
-    type: item.type,
-    time: formatClock(item.at),
-    text: item.text
-  }))
-}
-
-function waitingTitle(): string {
-  return trackingPhase === "detecting-mode" ? "检测到开局" : "等待开局"
-}
-
-function waitingDetail(): string {
-  return trackingPhase === "detecting-mode"
-    ? gameModeSource
-    : gameModeId
-      ? `${supportedModeLabel(gameModeId)} · 等待开局信号`
-      : "监听页面中，识别到 2v2 或 1v1 后开始记牌"
-}
-
 // content.ts 内部状态比较复杂；Vue 只消费这个快照。
 // 这样 UI 组件保持“纯展示”，业务决策集中在 content.ts，调试时也可以直接导出 snapshot 看全貌。
 function buildTrackerSnapshot(): TrackerSnapshot {
   const deckActive = isDeckActive()
-  const modeLabel = supportedModeLabel(gameModeId)
-  const connectionLabel = `${trackingPhase === "ended" ? "已结束" : status.listening ? "监听中" : "已暂停"} · ${phaseLabel()}`
-  const connectionClass = status.listening && trackingPhase !== "waiting" ? "is-live" : "is-paused"
-  const baselineText = midGameBaseline ? "中途接入" : "从开局统计"
-  const versionLabel = `${CONTENT_VERSION.replace("extension-content-", "")}${status.hookVersion ? ` · ${status.hookVersion.replace("extension-public-hook-", "")}` : ""}`
-  const displayedRemainingSource = `协议牌堆剩余 ${drawPileRemainingLabel()}；未见实体牌 ${cycleRemainingTotal()}；${drawPileRemainingSource || "等待协议牌堆信号"}`
-  const countWaiting = !deckActive || drawPileRemaining === undefined
-  return {
+  return buildTrackerSnapshotView({
     contentVersion: CONTENT_VERSION,
     hookVersion: status.hookVersion,
     trackingPhase,
     hasInGameSignal,
     ...(gameModeId ? { gameModeId } : {}),
-    gameModeLabel: modeLabel,
     gameModeSource,
     deckProfileSource,
-    connectionLabel,
-    connectionClass,
-    phaseLabel: phaseLabel(),
-    baselineText,
-    versionLabel,
-    countTitle: deckActive ? displayedRemainingSource : gameModeSource,
-    countText: deckActive && drawPileRemaining !== undefined ? `${drawPileCalibrated ? "" : "~"}${drawPileRemaining}` : "--",
-    ...(deckActive && drawPileRemaining !== undefined ? { countTotal: totalCards() } : {}),
-    countWaiting,
-    isDeckActive: deckActive,
+    ...(drawPileRemaining !== undefined ? { drawPileRemaining } : {}),
+    drawPileRemainingSource,
+    drawPileCalibrated,
+    midGameBaseline,
+    status,
+    deckActive,
     totalCards: totalCards(),
     cycleRemainingTotal: cycleRemainingTotal(),
     cycleSeenTotal: cycleSeenTotal(),
-    drawPileRemainingLabel: drawPileRemainingLabel(),
-    ...(drawPileRemaining !== undefined ? { drawPileRemaining } : {}),
-    drawPileCalibrated,
-    midGameBaseline,
-    status: { ...status },
     groups: deckActive
       ? [cardGroupView("basic", "基本牌"), cardGroupView("trick", "锦囊牌"), cardGroupView("equip", "装备牌")]
       : [],
     enemyHands: deckActive ? enemyKnownHandsView() : [],
     deckOrderPreview: deckActive ? deckOrderPreviewView() : emptyDeckOrderPreviewView(),
-    events: eventLogRows(),
-    waitingTitle: waitingTitle(),
-    waitingDetail: waitingDetail()
-  }
+    events: buildEventLogRows(displayEvents)
+  })
 }
 
 // Vue store 是 reactive 对象，不能整棵随意替换深层业务状态。
@@ -2797,58 +2206,12 @@ function syncReactiveState(): void {
   replaceTrackerSnapshot(buildTrackerSnapshot())
 }
 
-// 面板挂在 shadow DOM，避免网页原有 CSS 污染插件 UI，也避免插件样式影响游戏页面。
-// content.css 里原本按 id 写选择器，注入 shadow 后替换成 class 选择器以匹配 App 根节点。
-function mountVuePanel(): void {
-  const host = ensureRootHost()
-  if (vueApp) {
-    return
-  }
-  const shadow = host.shadowRoot ?? host.attachShadow({ mode: "open" })
-  const style = document.createElement("style")
-  style.textContent = trackerStyles
-    .replaceAll("#sgs-card-tracker-root", ".sgs-card-tracker-root")
-    .replaceAll("#sgs-known-hand-overlay-root", ".sgs-known-hand-overlay-root")
-  const mountPoint = document.createElement("div")
-  shadow.append(style, mountPoint)
-  vueApp = createApp(TrackerApp)
-  vueApp.mount(mountPoint)
-}
-
 function renderPanel(): void {
-  mountVuePanel()
-  syncReactiveState()
-  queueKnownHandOverlayRender()
-  queueRenderStateSnapshot()
+  panelRenderer.renderPanel()
 }
 
 function queueRender(): void {
-  if (renderQueued) {
-    return
-  }
-  renderQueued = true
-  scheduleRenderWork(() => {
-    renderQueued = false
-    renderPanel()
-  })
-}
-
-function scheduleRenderWork(callback: () => void): void {
-  if (document.visibilityState === "hidden") {
-    window.setTimeout(callback, 0)
-    return
-  }
-  window.requestAnimationFrame(callback)
-}
-
-function ensureRootHost(): HTMLElement {
-  let root = document.getElementById(ROOT_ID)
-  if (!root) {
-    root = document.createElement("div")
-    root.id = ROOT_ID
-    document.documentElement.append(root)
-  }
-  return root
+  panelRenderer.queueRender()
 }
 
 function bindTrackerActions(): void {
@@ -2889,7 +2252,7 @@ function bindTrackerActions(): void {
         existingIndex >= 0
           ? customRules.map((item) => (item.id === rule.id ? rule : item))
           : [...customRules, rule]
-      persistCustomRules()
+      persistStoredCustomRules(CUSTOM_RULES_STORAGE_KEY, customRules)
       refreshRuleLibrary()
       trackerStore.state.ruleConfig.lastError = ""
       trackerStore.state.ruleConfig.lastSavedAt = Date.now()
@@ -2914,7 +2277,7 @@ function bindTrackerActions(): void {
     if (!changed) {
       return
     }
-    persistCustomRules()
+    persistStoredCustomRules(CUSTOM_RULES_STORAGE_KEY, customRules)
     refreshRuleLibrary()
     trackerStore.state.ruleConfig.lastError = ""
     trackerStore.state.ruleConfig.lastSavedAt = Date.now()
@@ -2927,7 +2290,7 @@ function bindTrackerActions(): void {
       return
     }
     customRules = nextRules
-    persistCustomRules()
+    persistStoredCustomRules(CUSTOM_RULES_STORAGE_KEY, customRules)
     refreshRuleLibrary()
     trackerStore.state.ruleConfig.lastError = ""
     trackerStore.state.ruleConfig.lastSavedAt = Date.now()
@@ -2963,57 +2326,15 @@ function bindTrackerActions(): void {
 }
 
 function ensureRoot(): HTMLElement {
-  mountVuePanel()
-  return ensureRootHost()
+  return panelRenderer.ensureRoot()
 }
 
 function bindPanelEvents(_root: HTMLElement): void {
-  bindTrackerActions()
-}
-
-// 浮窗已废弃：敌方已知手牌已并入 Vue 面板。这里保留队列入口，避免协议层调用分叉。
-function renderKnownHandOverlay(): void {
-  document.getElementById(HAND_OVERLAY_ROOT_ID)?.remove()
+  panelRenderer.bindPanelEvents()
 }
 
 function queueKnownHandOverlayRender(force = false): void {
-  if (!IS_TOP_FRAME) {
-    return
-  }
-  const now = Date.now()
-  if (!force && now - lastHandOverlayRenderAt < 200) {
-    if (!handOverlayQueued) {
-      handOverlayQueued = true
-      window.setTimeout(() => {
-        handOverlayQueued = false
-        lastHandOverlayRenderAt = Date.now()
-        renderKnownHandOverlay()
-      }, 200)
-    }
-    return
-  }
-  if (handOverlayQueued) {
-    return
-  }
-  handOverlayQueued = true
-  scheduleRenderWork(() => {
-    handOverlayQueued = false
-    lastHandOverlayRenderAt = Date.now()
-    renderKnownHandOverlay()
-  })
-}
-
-function phaseLabel(): string {
-  if (trackingPhase === "in-game") {
-    return "对局中"
-  }
-  if (trackingPhase === "ended") {
-    return "已结束"
-  }
-  if (trackingPhase === "detecting-mode") {
-    return "识别模式"
-  }
-  return "等待开局"
+  panelRenderer.queueKnownHandOverlayRender(force)
 }
 
 function currentStateSignature(): string {
@@ -3150,71 +2471,65 @@ function pushRecentHookRecord(record: HookRecord): void {
 // 导出/collector 使用的快照会比 Vue snapshot 更完整，包含原始诊断窗口和内部状态。
 // 面板展示用 buildTrackerSnapshot；复盘问题用 buildExportPayload。
 function buildDiagnostics(): CollectorDiagnostics {
-  const now = Date.now()
-  return {
+  return buildCollectorDiagnostics({
     href: location.href,
     title: document.title,
     pageInstanceId: PAGE_INSTANCE_ID,
     contentVersion: CONTENT_VERSION,
-    isTopFrame: IS_TOP_FRAME,
     visibilityState: document.visibilityState,
+    isTopFrame: IS_TOP_FRAME,
     hasFocus: document.hasFocus(),
-    lastRecordAgeMs: status.lastRecordAt ? now - status.lastRecordAt : null,
-    collectorLastPostAt: lastCollectorPostAt ? new Date(lastCollectorPostAt).toISOString() : null,
-    collectorPostAgeMs: lastCollectorPostAt ? now - lastCollectorPostAt : null,
+    lastRecordAt: status.lastRecordAt,
+    collectorLastPostAt: lastCollectorPostAt,
     collectorSequence,
-    recentHookRecords: recentHookRecords.slice(-120),
-    recentRawHookRecords: recentRawHookRecords.slice(-120),
+    recentHookRecords,
+    recentRawHookRecords,
     recentRawTextCount: recentRawTexts.length,
     seenStageTextCount: seenStageTexts.size,
     recentTextKeyCount: recentTextTimes.size,
     exactSourceKeyCount: exactSourceKeys.size
-  }
+  })
 }
 
 function buildExportPayload(reason: string): ExportPayload {
-  return {
-    exportedAt: new Date().toISOString(),
-    source: "sgs-extension-hook",
+  const deckOrderPreview =
+    deckOrderPreviewState.top.length || deckOrderPreviewState.bottom.length || deckOrderPreviewState.peekCount
+      ? {
+          top: deckOrderPreviewState.top.map((card) => card.cardId),
+          bottom: deckOrderPreviewState.bottom.map((card) => card.cardId),
+          topCards: deckOrderPreviewState.top.map(deckOrderPreviewExportCard),
+          bottomCards: deckOrderPreviewState.bottom.map(deckOrderPreviewExportCard),
+          peekCount: deckOrderPreviewState.peekCount,
+          at: deckOrderPreviewState.at
+        }
+      : undefined
+  return buildCollectorExportPayload({
+    reason,
     pageInstanceId: PAGE_INSTANCE_ID,
     sequence: collectorSequence,
-    reason,
     pageUrl: location.href,
     trackingPhase,
     hasInGameSignal,
     ...(gameModeId ? { gameModeId } : {}),
-    gameModeLabel: supportedModeLabel(gameModeId),
     gameModeSource,
     deckProfile,
     deckProfileSource,
+    ...(drawPileRemaining !== undefined ? { drawPileRemaining } : {}),
     drawPileRemainingSource,
     drawPileCalibrated,
     midGameBaseline,
     seatRegistry: Array.from(seatRegistry.values()),
-    allyPlayerKeys: Array.from(allyPlayerKeys),
-    playerAnchors: Array.from(playerAnchorsByKey.values()),
-    status: { ...status },
-    trackerState,
-    seenExactCards: seenExactCards.slice(),
-    exactCardStates: seenExactCards.slice(),
-    ...(deckOrderPreviewState.top.length || deckOrderPreviewState.bottom.length || deckOrderPreviewState.peekCount
-      ? {
-          guanxing: {
-            top: deckOrderPreviewState.top.map((card) => card.cardId),
-            bottom: deckOrderPreviewState.bottom.map((card) => card.cardId),
-            topCards: deckOrderPreviewState.top.map(deckOrderPreviewExportCard),
-            bottomCards: deckOrderPreviewState.bottom.map(deckOrderPreviewExportCard),
-            peekCount: deckOrderPreviewState.peekCount,
-            at: deckOrderPreviewState.at
-          }
-        }
-      : {}),
-    recentEvents: displayEvents.slice(-100),
-    diagnostics: buildDiagnostics(),
     ...(selfSeatId !== undefined ? { selfSeatId } : {}),
     ...(selfFigure !== undefined ? { selfFigure } : {}),
-    ...(drawPileRemaining !== undefined ? { drawPileRemaining } : {})
-  }
+    allyPlayerKeys: Array.from(allyPlayerKeys),
+    playerAnchors: Array.from(playerAnchorsByKey.values()),
+    status,
+    trackerState,
+    seenExactCards: seenExactCards.slice(),
+    ...(deckOrderPreview ? { deckOrderPreview } : {}),
+    recentEvents: displayEvents.slice(-100),
+    diagnostics: buildDiagnostics()
+  })
 }
 
 async function postCollectorSnapshot(reason: string): Promise<void> {
@@ -3556,7 +2871,7 @@ function injectPageHook(): void {
     return
   }
 
-  const hookUrl = runtimeUrl("pageHook.js")
+  const hookUrl = runtimeUrls.runtimeUrl("pageHook.js")
   if (!hookUrl) {
     return
   }
@@ -3569,38 +2884,10 @@ function injectPageHook(): void {
   ;(document.head || document.documentElement).append(script)
 }
 
-function isHookMessage(value: unknown): value is HookMessage {
-  return Boolean(
-    value &&
-      typeof value === "object" &&
-      ((value as HookMessage).source === "sgs-tracker-page-hook" || (value as HookMessage).source === "sgs-tracker-frame-hook") &&
-      (value as HookMessage).record
-  )
-}
-
-function forwardFrameHookMessage(message: HookMessage): void {
-  try {
-    window.top?.postMessage(
-      {
-        source: "sgs-tracker-frame-hook",
-        hookVersion: message.hookVersion,
-        frameUrl: location.href,
-        record: {
-          ...message.record,
-          frameUrl: location.href
-        }
-      } satisfies HookMessage,
-      "*"
-    )
-  } catch {
-    // Cross-frame forwarding is best-effort; collector diagnostics will reveal gaps.
-  }
-}
-
 // 页面可能 bfcache 恢复、切前台、扩展重载或网络恢复。
 // 这些时机重新注入 hook，确保长期挂着页面时采集链路能自愈。
 function reconnectPageHook(reason: string): void {
-  if (!extensionContextValid) {
+  if (!runtimeUrls.isContextValid()) {
     return
   }
   injectPageHook()
