@@ -195,13 +195,13 @@ onBeforeUnmount(() => {
       </div>
 
       <footer class="sgs-tracker-footer">
-        <div v-if="snapshot.guanxing.visible" class="sgs-guanxing" :title="snapshot.guanxing.title">
-          <span class="sgs-gx-head">观星控底</span>
-          <span v-if="snapshot.guanxing.topCount > 0" class="sgs-gx-top" :title="snapshot.guanxing.topTitle">
-            顶 {{ snapshot.guanxing.topCount }} 张待摸
+        <div v-if="snapshot.deckOrderPreview.visible" class="sgs-guanxing" :title="snapshot.deckOrderPreview.title">
+          <span class="sgs-gx-head">{{ snapshot.deckOrderPreview.heading }}</span>
+          <span v-if="snapshot.deckOrderPreview.topCount > 0" class="sgs-gx-top" :title="snapshot.deckOrderPreview.topTitle">
+            顶 {{ snapshot.deckOrderPreview.topCount }} 张待摸
           </span>
-          <span v-if="snapshot.guanxing.bottomCount > 0" class="sgs-gx-bottom" :title="snapshot.guanxing.bottomTitle">
-            底 {{ snapshot.guanxing.bottomCount }} 张垫底
+          <span v-if="snapshot.deckOrderPreview.bottomCount > 0" class="sgs-gx-bottom" :title="snapshot.deckOrderPreview.bottomTitle">
+            底 {{ snapshot.deckOrderPreview.bottomCount }} 张垫底
           </span>
         </div>
         <div class="sgs-footer-stats">

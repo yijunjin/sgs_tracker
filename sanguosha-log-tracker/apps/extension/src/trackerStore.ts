@@ -120,8 +120,9 @@ export type EnemyHandView = {
   moreCount: number
 }
 
-export type GuanxingView = {
+export type DeckOrderPreviewView = {
   visible: boolean
+  heading: string
   title: string
   topCount: number
   topTitle: string
@@ -165,7 +166,7 @@ export type TrackerSnapshot = {
   status: StatusState
   groups: CardGroupView[]
   enemyHands: EnemyHandView[]
-  guanxing: GuanxingView
+  deckOrderPreview: DeckOrderPreviewView
   events: EventLogRowView[]
   waitingTitle: string
   waitingDetail: string
@@ -268,8 +269,9 @@ export const trackerStore = reactive<TrackerStore>({
     status: { ...defaultStatus },
     groups: [],
     enemyHands: [],
-    guanxing: {
+    deckOrderPreview: {
       visible: false,
+      heading: "",
       title: "",
       topCount: 0,
       topTitle: "",

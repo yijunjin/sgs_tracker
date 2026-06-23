@@ -1,7 +1,11 @@
 import {
   applyEvent,
   applyDeckPileMove,
+  addDeckOrderPreviewDetails,
+  applyDeckOrderPreviewMove,
+  consumeDeckOrderPreviewTop,
   createInitialTrackerState,
+  createDeckOrderPreviewState,
   deckMoveCount,
   defaultDeckProfile,
   deckProfiles,
@@ -17,6 +21,10 @@ import {
   systemRuleLibrary,
   type CardName,
   type DeckCardEntry,
+  type DeckOrderPreviewCard,
+  type DeckOrderPreviewCardDetail,
+  type DeckOrderPreviewConfig,
+  type DeckOrderPreviewState,
   type DeckPileState,
   type ParsedLogEvent,
   type RuleDefinition,
@@ -36,7 +44,7 @@ import {
   type EnemyHandView,
   type EnemyKnownCardView,
   type EventLogRowView,
-  type GuanxingView,
+  type DeckOrderPreviewView,
   type TrackerSnapshot
 } from "./trackerStore"
 
@@ -124,14 +132,7 @@ type DeckCardRow = {
   variants: DeckCardEntry[]
 }
 
-type GuanxingCardDetail = Pick<DeckCardEntry, "name" | "rank" | "suit" | "description">
-
-type GuanxingCard = {
-  cardId: number
-  detail?: GuanxingCardDetail
-}
-
-type GuanxingExportCard = {
+type DeckOrderPreviewExportCard = {
   cardId: number
   name?: string
   suit?: string
@@ -348,22 +349,39 @@ const recentProtocolMoveTimes = new Map<string, number>()
 let rawCollectorQueued = false
 let lastProtocolDeckSignature = ""
 
-// 观星控底追踪（协议驱动，零猜测）：
-//   观星开始：FromZone 1 → ToZone 8 (MoveType 6)，取走牌堆顶 N 张到观星暂存区。
-//   摆回牌堆：FromZone 8 → ToZone 1 (MoveType 7)，ToPosition 65280(0xFF00)=顶部、0/缺失=底部。
-// 真机抓包验证：摆到顶部组的 cardId 会被随后的摸牌(1→其它)按序摸走，故 guanxingTop 头部 = 下一张待摸。
-// guanxingBottom 垫在牌堆最底，本轮一般摸不到（除非洗牌前摸空），仅作信息展示。
-const GUANXING_ZONE = 8
-const GUANXING_TOP_POSITION = 65280
+// 牌堆顺序预览追踪（协议驱动，零猜测）：
+// 当前观星只是一个配置来源：FromZone 1 → previewZone 表示查看牌堆顶 N 张；
+// previewZone → 1 表示摆回牌堆，topPosition=顶部，其余=底部。
+// 真机抓包验证：观星摆到顶部组的 cardId 数组靠后者更接近下一张摸牌，因此 topOrder=reverse。
+type DeckOrderPreviewSource = {
+  id: string
+  label: string
+  heading: string
+  titlePrefix: string
+  topTipLabel: string
+  bottomTipLabel: string
+  config: DeckOrderPreviewConfig
+}
+
+const DECK_ORDER_PREVIEW_SOURCE: DeckOrderPreviewSource = {
+  id: "guanxing",
+  label: "观星",
+  heading: "观星控底",
+  titlePrefix: "观星控底",
+  topTipLabel: "你观星控到牌堆顶、尚未被摸走的牌",
+  bottomTipLabel: "你观星垫到牌堆底的牌",
+  config: {
+    drawPileZone: 1,
+    previewZone: 8,
+    topPosition: 65280,
+    topOrder: "reverse",
+    bottomOrder: "as-is"
+  }
+}
 const HAND_ZONE = 5
 const TEMP_HAND_ZONE = 10
 const DIMENG_SPELL_ID = 121
-let guanxingTop: GuanxingCard[] = []
-let guanxingBottom: GuanxingCard[] = []
-let pendingGuanxingTopDetails: GuanxingCardDetail[] = []
-let pendingGuanxingBottomDetails: GuanxingCardDetail[] = []
-let guanxingPeekCount = 0
-let guanxingAt = 0
+let deckOrderPreviewState: DeckOrderPreviewState = createDeckOrderPreviewState()
 
 type ExportPayload = {
   exportedAt: string
@@ -395,8 +413,8 @@ type ExportPayload = {
   guanxing?: {
     top: number[]
     bottom: number[]
-    topCards?: GuanxingExportCard[]
-    bottomCards?: GuanxingExportCard[]
+    topCards?: DeckOrderPreviewExportCard[]
+    bottomCards?: DeckOrderPreviewExportCard[]
     peekCount: number
     at: number
   }
@@ -691,11 +709,7 @@ function cardDescription(name: string): string | undefined {
   return deckProfile.cards.find((card) => card.name === name)?.description
 }
 
-function guanxingCardFromId(cardId: number): GuanxingCard {
-  return { cardId }
-}
-
-function guanxingExportCard(card: GuanxingCard): GuanxingExportCard {
+function deckOrderPreviewExportCard(card: DeckOrderPreviewCard): DeckOrderPreviewExportCard {
   return {
     cardId: card.cardId,
     ...(card.detail?.name ? { name: card.detail.name } : {}),
@@ -704,57 +718,27 @@ function guanxingExportCard(card: GuanxingCard): GuanxingExportCard {
   }
 }
 
-function guanxingCardLabel(card: GuanxingCard): string {
+function deckOrderPreviewCardLabel(card: DeckOrderPreviewCard): string {
   if (card.detail) {
     return cardFullLabel(card.detail)
   }
   return card.cardId > 0 ? `牌面未捕获 #${card.cardId}` : "牌面未捕获"
 }
 
-function guanxingCardsTip(label: string, cards: GuanxingCard[], hint: string): string {
-  const rows = cards.map((card, index) => `${index + 1}. ${guanxingCardLabel(card)}`)
+function deckOrderPreviewCardsTip(label: string, cards: DeckOrderPreviewCard[], hint: string): string {
+  const rows = cards.map((card, index) => `${index + 1}. ${deckOrderPreviewCardLabel(card)}`)
   return [label, hint, ...rows].filter(Boolean).join("\n")
 }
 
-// 观星协议只告诉我们 cardId 的移动方向；页面文本有时会补充“牌面详情”。
-// 因此这里把文本解析到的详情挂到尚未有 detail 的 guanxingTop/Bottom 条目上。
-function fillGuanxingDetails(queue: GuanxingCard[], details: GuanxingCardDetail[], edge: "head" | "tail"): GuanxingCardDetail[] {
-  if (!details.length) {
-    return []
-  }
-  const indices = queue
-    .map((card, index) => (card.detail ? -1 : index))
-    .filter((index) => index >= 0)
-  const targetIndices = edge === "head" ? indices.slice(0, details.length) : indices.slice(Math.max(0, indices.length - details.length))
-  targetIndices.forEach((queueIndex, detailIndex) => {
-    const card = queue[queueIndex]
-    const detail = details[detailIndex]
-    if (card && detail) {
-      card.detail = detail
-    }
-  })
-  return details.slice(targetIndices.length)
-}
-
-function attachDetailsToGuanxingCards(cards: GuanxingCard[], pendingDetails: GuanxingCardDetail[]): GuanxingCard[] {
-  pendingDetails.forEach((detail, index) => {
-    const card = cards[index]
-    if (card) {
-      card.detail = detail
-    }
-  })
-  return cards
-}
-
-function stripGuanxingPlacementPrefix(content: string): string {
+function stripDeckOrderPreviewPlacementPrefix(content: string): string {
   return content
     .replace(/^\s*(?:[一二三四五六七八九十两\d]+)张(?:卡牌|牌)?/u, "")
     .replace(/^\s*卡牌/u, "")
     .trim()
 }
 
-function guanxingCardDetailsFromContent(content: string): GuanxingCardDetail[] {
-  const normalizedContent = normalizeText(stripGuanxingPlacementPrefix(content))
+function deckOrderPreviewCardDetailsFromContent(content: string): DeckOrderPreviewCardDetail[] {
+  const normalizedContent = normalizeText(stripDeckOrderPreviewPlacementPrefix(content))
   if (!normalizedContent) {
     return []
   }
@@ -765,7 +749,7 @@ function guanxingCardDetailsFromContent(content: string): GuanxingCardDetail[] {
   const aliasMap = new Map(aliases.map((item) => [item.alias, item.canonical]))
   const namePattern = aliases.map((item) => item.alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")
   const pattern = new RegExp(`(${namePattern})([♠♥♣♦])?(A|10|[2-9JQK])?`, "gu")
-  const details: GuanxingCardDetail[] = []
+  const details: DeckOrderPreviewCardDetail[] = []
   let match: RegExpExecArray | null
   while ((match = pattern.exec(normalizedContent))) {
     const name = aliasMap.get(match[1] ?? "") ?? match[1]
@@ -786,9 +770,9 @@ function guanxingCardDetailsFromContent(content: string): GuanxingCardDetail[] {
 }
 
 // 处理类似“将 X 张牌置于牌堆顶/底”的公开文本。
-// 这类文本可以补齐观星卡牌详情，但不作为牌堆移动的权威来源；
+// 这类文本可以补齐牌堆顺序预览的牌面详情，但不作为牌堆移动的权威来源；
 // 真正的顺序仍以协议里的 FromZone/ToZone/ToPosition 为准。
-function ingestGuanxingPlacementText(text: string, at: number): boolean {
+function ingestDeckOrderPreviewPlacementText(text: string, at: number): boolean {
   if (!/置于牌堆[顶底]/u.test(text)) {
     return false
   }
@@ -799,20 +783,19 @@ function ingestGuanxingPlacementText(text: string, at: number): boolean {
     const prefix = text.slice(0, match.index)
     const lastJiangIndex = prefix.lastIndexOf("将")
     const rawContent = lastJiangIndex >= 0 ? prefix.slice(lastJiangIndex + 1) : (prefix.split(/[，,。；;]/u).pop() ?? "")
-    const details = guanxingCardDetailsFromContent(rawContent)
+    const details = deckOrderPreviewCardDetailsFromContent(rawContent)
     if (!details.length) {
       continue
     }
     const isTop = match[1] === "顶"
-    const displayOrderDetails = isTop ? [...details].reverse() : details
-    if (isTop) {
-      const leftovers = fillGuanxingDetails(guanxingTop, displayOrderDetails, "head")
-      pendingGuanxingTopDetails = leftovers.concat(pendingGuanxingTopDetails).slice(0, Math.max(8, guanxingPeekCount))
-    } else {
-      const leftovers = fillGuanxingDetails(guanxingBottom, displayOrderDetails, "tail")
-      pendingGuanxingBottomDetails = pendingGuanxingBottomDetails.concat(leftovers).slice(-Math.max(8, guanxingPeekCount))
-    }
-    guanxingAt = at
+    const displayOrderDetails = isTop && DECK_ORDER_PREVIEW_SOURCE.config.topOrder === "reverse" ? [...details].reverse() : details
+    deckOrderPreviewState = addDeckOrderPreviewDetails(
+      deckOrderPreviewState,
+      DECK_ORDER_PREVIEW_SOURCE.config,
+      isTop ? "top" : "bottom",
+      displayOrderDetails,
+      at
+    )
     changed = true
   }
   return changed
@@ -859,7 +842,7 @@ function resetRuntimeStateForProfile(): void {
   playerAnchorsByKey.clear()
   resetSeatRegistry()
   resetProtocolCardState()
-  resetGuanxingState()
+  resetDeckOrderPreviewState()
 }
 
 function resetRoundCounters(): void {
@@ -884,7 +867,7 @@ function resetRoundStateForNewGame(at: number, source: string, options: { clearP
   exactSourceKeys.clear()
   protocolCardZonesById.clear()
   recentProtocolMoveTimes.clear()
-  resetGuanxingState()
+  resetDeckOrderPreviewState()
   if (options.clearProtocolDeck) {
     resetProtocolCardState()
   }
@@ -913,13 +896,8 @@ function resetProtocolCardState(): void {
   lastProtocolDeckSignature = ""
 }
 
-function resetGuanxingState(): void {
-  guanxingTop = []
-  guanxingBottom = []
-  pendingGuanxingTopDetails = []
-  pendingGuanxingBottomDetails = []
-  guanxingPeekCount = 0
-  guanxingAt = 0
+function resetDeckOrderPreviewState(): void {
+  deckOrderPreviewState = createDeckOrderPreviewState()
 }
 
 // 切换模式时会同步切换 deckProfile。注意：这不是单纯改 UI 标签，
@@ -1286,57 +1264,31 @@ function seedProtocolDeck(cardIds: number[], at: number): boolean {
   return changed
 }
 
-// 观星：处理与观星暂存区(zone 8)相关的协议移动。返回 true 表示这是观星移动、已被本函数消化。
-//   1 → 8 (MoveType 6)：取走牌堆顶 N 张进入观星，记录 peek 数并清空上一轮残留。
-//   8 → 1 (MoveType 7)：摆回牌堆。ToPosition 65280=顶部(下家会摸到)、其余=底部。
-function handleGuanxingMove(
+// 处理“查看牌堆顶若干张，再放回牌堆顶/底”的协议移动。返回 true 表示已被顺序预览状态机消化。
+function handleDeckOrderPreviewMove(
   fromZone: number | undefined,
   toZone: number | undefined,
   toPosition: number | undefined,
   cardIds: number[],
   at: number
 ): boolean {
-  if (fromZone === 1 && toZone === GUANXING_ZONE) {
-    // 观星开始：牌堆顶若干张被取出观看。新一轮观星，丢弃上一轮残留。
-    guanxingTop = []
-    guanxingBottom = []
-    pendingGuanxingTopDetails = []
-    pendingGuanxingBottomDetails = []
-    guanxingPeekCount = cardIds.length
-    guanxingAt = at
-    pushDisplayEvent({ at, type: "protocol", text: `观星：查看牌堆顶 ${cardIds.length} 张` })
-    return true
+  const result = applyDeckOrderPreviewMove(deckOrderPreviewState, DECK_ORDER_PREVIEW_SOURCE.config, {
+    fromZone,
+    toZone,
+    toPosition,
+    cardIds,
+    at
+  })
+  deckOrderPreviewState = result.state
+  if (result.started) {
+    pushDisplayEvent({ at, type: "protocol", text: `${DECK_ORDER_PREVIEW_SOURCE.label}：查看牌堆顶 ${cardIds.length} 张` })
   }
-
-  if (fromZone === GUANXING_ZONE && toZone === 1) {
-    // 摆回牌堆。顶部牌按“数组靠后=更接近下一张摸牌”排列（真机验证）；为便于消费，
-    // guanxingTop 头部即下一张待摸，故反转入队。底部牌按文本/协议顺序累积展示。
-    if (toPosition === GUANXING_TOP_POSITION) {
-      const cards = attachDetailsToGuanxingCards(
-        [...cardIds].reverse().map(guanxingCardFromId),
-        pendingGuanxingTopDetails.splice(0, cardIds.length)
-      )
-      guanxingTop = cards.concat(guanxingTop)
-    } else {
-      const cards = attachDetailsToGuanxingCards(
-        cardIds.map(guanxingCardFromId),
-        pendingGuanxingBottomDetails.splice(0, cardIds.length)
-      )
-      guanxingBottom = guanxingBottom.concat(cards)
-    }
-    guanxingAt = at
-    return true
-  }
-
-  return false
+  return result.handled
 }
 
-// 摸牌(1→其它)时推进观星控顶消费：每从牌堆顶摸走 1 张，控顶队列头部出列。
-function consumeGuanxingTopOnDraw(drawnCount: number): void {
-  if (drawnCount <= 0 || guanxingTop.length === 0) {
-    return
-  }
-  guanxingTop.splice(0, Math.min(drawnCount, guanxingTop.length))
+// 摸牌(1→其它)时推进控顶消费：每从牌堆顶摸走 1 张，预览队列头部出列。
+function consumeDeckOrderPreviewTopOnDraw(drawnCount: number): void {
+  deckOrderPreviewState = consumeDeckOrderPreviewTop(deckOrderPreviewState, drawnCount)
 }
 
 // 协议移动如果能解析到实体牌，就把它合并进 seenExactCards。
@@ -1437,8 +1389,8 @@ function clearSeenCardStateForRecycle(): void {
   protocolCardZonesById.clear()
   recentProtocolMoveTimes.clear()
   exactSourceKeys.clear()
-  // 洗牌后牌堆顺序作废，观星控底信息失效。
-  resetGuanxingState()
+  // 洗牌后牌堆顺序作废，控顶/控底信息失效。
+  resetDeckOrderPreviewState()
   // 重新放回保留的场上/手牌占用牌；只有 player-visible 是“已知手牌”，需要重建玩家已知牌计数。
   for (const card of preserved) {
     seenExactCards.push(card)
@@ -1844,15 +1796,15 @@ function ingestRawProtocolRecord(record: HookRecord): boolean {
   if (fromZone === 2 && toZone === 9 && moveType === 255) {
     return recycleProtocolDiscardPile(record.at, cardCount)
   }
-  // 观星暂存区(zone 8)进出：记录控顶/控底，再交给牌堆计数（1→8 出、8→1 入，净额为 0）。
-  if (handleGuanxingMove(fromZone, toZone, toPosition, cardIds, record.at)) {
+  // 牌堆顺序预览暂存区进出：记录控顶/控底，再交给牌堆计数（1→暂存出、暂存→1 入，净额为 0）。
+  if (handleDeckOrderPreviewMove(fromZone, toZone, toPosition, cardIds, record.at)) {
     changed = updateDrawPileRemainingFromProtocolMove(fromZone, toZone, cardCount, cardIds, record.at) || changed
     return true
   }
   changed = updateDrawPileRemainingFromProtocolMove(fromZone, toZone, cardCount, cardIds, record.at) || changed
-  // 普通摸牌(牌堆→非牌堆且非观星)推进控顶消费：顶部牌被摸走则出列。
-  if (fromZone === 1 && toZone !== 1 && toZone !== GUANXING_ZONE && cardIds.length) {
-    consumeGuanxingTopOnDraw(cardIds.length)
+  // 普通摸牌(牌堆→非牌堆且非预览暂存区)推进控顶消费：顶部牌被摸走则出列。
+  if (fromZone === 1 && toZone !== 1 && toZone !== DECK_ORDER_PREVIEW_SOURCE.config.previewZone && cardIds.length) {
+    consumeDeckOrderPreviewTopOnDraw(cardIds.length)
   }
   changed = handleDimengKnownHandMove(handMove) || changed
 
@@ -2728,16 +2680,34 @@ function knownHandChipView(card: CurrentKnownCard): EnemyKnownCardView {
   }
 }
 
-function guanxingView(): GuanxingView {
-  const topCount = guanxingTop.length
-  const bottomCount = guanxingBottom.length
+function emptyDeckOrderPreviewView(): DeckOrderPreviewView {
+  return {
+    visible: false,
+    heading: "",
+    title: "",
+    topCount: 0,
+    topTitle: "",
+    bottomCount: 0,
+    bottomTitle: ""
+  }
+}
+
+function deckOrderPreviewView(): DeckOrderPreviewView {
+  const topCount = deckOrderPreviewState.top.length
+  const bottomCount = deckOrderPreviewState.bottom.length
+  const source = DECK_ORDER_PREVIEW_SOURCE
   return {
     visible: topCount > 0 || bottomCount > 0,
-    title: `观星控底：查看过 ${guanxingPeekCount} 张；悬浮顶/底数字可看已捕获牌面`,
+    heading: source.heading,
+    title: `${source.titlePrefix}：查看过 ${deckOrderPreviewState.peekCount} 张；悬浮顶/底数字可看已捕获牌面`,
     topCount,
-    topTitle: topCount > 0 ? guanxingCardsTip("你观星控到牌堆顶、尚未被摸走的牌", guanxingTop, "按摸牌顺序排列，1 即下一张摸牌") : "",
+    topTitle: topCount > 0
+      ? deckOrderPreviewCardsTip(source.topTipLabel, deckOrderPreviewState.top, "按摸牌顺序排列，1 即下一张摸牌")
+      : "",
     bottomCount,
-    bottomTitle: bottomCount > 0 ? guanxingCardsTip("你观星垫到牌堆底的牌", guanxingBottom, "本轮一般摸不到，洗牌后失效") : ""
+    bottomTitle: bottomCount > 0
+      ? deckOrderPreviewCardsTip(source.bottomTipLabel, deckOrderPreviewState.bottom, "本轮一般摸不到，洗牌后失效")
+      : ""
   }
 }
 
@@ -2804,7 +2774,7 @@ function buildTrackerSnapshot(): TrackerSnapshot {
       ? [cardGroupView("basic", "基本牌"), cardGroupView("trick", "锦囊牌"), cardGroupView("equip", "装备牌")]
       : [],
     enemyHands: deckActive ? enemyKnownHandsView() : [],
-    guanxing: deckActive ? guanxingView() : { visible: false, title: "", topCount: 0, topTitle: "", bottomCount: 0, bottomTitle: "" },
+    deckOrderPreview: deckActive ? deckOrderPreviewView() : emptyDeckOrderPreviewView(),
     events: eventLogRows(),
     waitingTitle: waitingTitle(),
     waitingDetail: waitingDetail()
@@ -3227,15 +3197,15 @@ function buildExportPayload(reason: string): ExportPayload {
     trackerState,
     seenExactCards: seenExactCards.slice(),
     exactCardStates: seenExactCards.slice(),
-    ...(guanxingTop.length || guanxingBottom.length || guanxingPeekCount
+    ...(deckOrderPreviewState.top.length || deckOrderPreviewState.bottom.length || deckOrderPreviewState.peekCount
       ? {
           guanxing: {
-            top: guanxingTop.map((card) => card.cardId),
-            bottom: guanxingBottom.map((card) => card.cardId),
-            topCards: guanxingTop.map(guanxingExportCard),
-            bottomCards: guanxingBottom.map(guanxingExportCard),
-            peekCount: guanxingPeekCount,
-            at: guanxingAt
+            top: deckOrderPreviewState.top.map((card) => card.cardId),
+            bottom: deckOrderPreviewState.bottom.map((card) => card.cardId),
+            topCards: deckOrderPreviewState.top.map(deckOrderPreviewExportCard),
+            bottomCards: deckOrderPreviewState.bottom.map(deckOrderPreviewExportCard),
+            peekCount: deckOrderPreviewState.peekCount,
+            at: deckOrderPreviewState.at
           }
         }
       : {}),
@@ -3450,7 +3420,7 @@ function ingestUnredactedTextRecord(record: HookRecord, at: number): boolean {
   }
 
   changed = moveActiveJudgeCardToPublic(record.text, at) || changed
-  changed = ingestGuanxingPlacementText(record.text, at) || changed
+  changed = ingestDeckOrderPreviewPlacementText(record.text, at) || changed
   // shared parser 负责把自然语言日志转成 GameEvent/ParsedLogEvent。
   // activeRuleLibrary 允许用户补充特殊技能规则，例如“发动集智额外摸牌”。
   const gameEvents = parseGameEvents([{ text: record.text, score: 1 }], "hook", deckProfile)
